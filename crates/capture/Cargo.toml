@@ -1,6 +1,6 @@
 [package]
 name = "analyzer-capture"
-description = "Захват окна трансляции: ScreenCaptureKit на macOS"
+description = "Захват окна трансляции: ScreenCaptureKit на macOS, Windows.Graphics.Capture на Windows"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -15,6 +15,28 @@ tracing.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
 screencapturekit.workspace = true
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { workspace = true, features = [
+    "Foundation",
+    "Graphics_Capture",
+    "Graphics_DirectX_Direct3D11",
+    "Security_Authorization_AppCapabilityAccess",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_System_WinRT_Direct3D11",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_Shell",
+] }
+
+# Проверка захвата рисует своё окно и захватывает его без системного выбора.
+[target.'cfg(target_os = "windows")'.dev-dependencies]
+windows = { workspace = true, features = [
+    "Win32_Graphics_Gdi",
+    "Win32_System_LibraryLoader",
+    "Win32_System_WinRT_Graphics_Capture",
+] }
 
 [lints]
 workspace = true

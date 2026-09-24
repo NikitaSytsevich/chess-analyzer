@@ -61,8 +61,8 @@ pub struct CaptureStats {
 
 /// Размер кадра в пикселях: как у источника, но не больше `max_side` по
 /// длинной стороне, с сохранением пропорций.
-// Захват на Windows (шаг 2) тоже будет уменьшать кадр по длинной стороне.
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+// Где захвата окна нет (не macOS и не Windows), функция нужна только тестам.
+#[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(dead_code))]
 pub(crate) fn fit_pixels(width: f64, height: f64, max_side: u32) -> (u32, u32) {
     let longest = width.max(height).max(1.0);
     let scale = (f64::from(max_side) / longest).min(1.0);
