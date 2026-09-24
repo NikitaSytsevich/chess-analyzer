@@ -14,7 +14,7 @@ mod stable;
 use std::time::{Duration, Instant};
 
 use analyzer_chess::{Chess, Game, Move, SanPlus};
-use analyzer_vision::Observation;
+use analyzer_vision::{Observation, Orientation};
 
 pub use crate::infer::{Explanation, board_to_position, explain};
 use crate::stable::Stabilizer;
@@ -76,15 +76,39 @@ pub struct Tracker {
     stabilizer: Stabilizer,
     /// С какого момента устойчивая расстановка ничем не объясняется.
     lost_since: Option<Instant>,
+    /// Какой стороной к зрителю стоит доска текущей партии.
+    orientation: Option<Orientation>,
+    /// Ориентацию задал комментатор: новые партии не переворачиваются сами.
+    orientation_locked: bool,
 }
 
 impl Tracker {
     pub fn new(config: TrackerConfig) -> Self {
-        Self { stabilizer: Stabilizer::new(&config), config, game: None, lost_since: None }
+        Self {
+            stabilizer: Stabilizer::new(&config),
+            config,
+            game: None,
+            lost_since: None,
+            orientation: None,
+            orientation_locked: false,
+        }
     }
 
     pub fn game(&self) -> Option<&Game> {
         self.game.as_ref()
+    }
+
+    /// Какой стороной к зрителю стоит доска текущей партии. Начиная партию,
+    /// трекер мог прочитать доску с другой стороны, чем распознавание (см.
+    /// `start`), — тогда распознаванию нужно перейти на эту ориентацию.
+    pub fn orientation(&self) -> Option<Orientation> {
+        self.orientation
+    }
+
+    /// Комментатор сам выбрал, какой стороной стоит доска (или отменил
+    /// выбор): пока выбор в силе, новые партии не переворачиваются сами.
+    pub fn lock_orientation(&mut self, locked: bool) {
+        self.orientation_locked = locked;
     }
 
     /// Забыть партию: следующая устойчивая расстановка начнёт новую.
@@ -92,6 +116,7 @@ impl Tracker {
         self.game = None;
         self.stabilizer = Stabilizer::new(&self.config);
         self.lost_since = None;
+        self.orientation = None;
     }
 
     /// Комментатор сам задал позицию (исправил распознавание или вставил FEN).
@@ -151,7 +176,23 @@ impl Tracker {
     }
 
     fn start(&mut self, observation: &Observation, reason: StartReason) -> Option<GameEvent> {
+        // Новая партия может идти с другой стороны: Lichess поворачивает
+        // доску к тому, кто играет чёрными. Прочитанная не той стороной, она
+        // остаётся допустимой позицией — только белые пешки на седьмой
+        // горизонтали, а чёрные на второй, — и анализ шёл бы по бессмыслице.
+        // Если фигуры явно стоят вверх ногами, партия начинается с
+        // повёрнутой доски.
+        let rotated;
+        let observation = match observation.evident_orientation() {
+            Some(evident) if !self.orientation_locked && evident != observation.orientation => {
+                tracing::info!(?evident, "the board is shown from the other side");
+                rotated = observation.rotated();
+                &rotated
+            }
+            _ => observation,
+        };
         let position = infer::board_to_position(observation, self.game.as_ref().map(Game::current))?;
+        self.orientation = Some(observation.orientation);
         self.game = Some(Game::new(position.clone()));
         self.lost_since = None;
         self.stabilizer.settle();

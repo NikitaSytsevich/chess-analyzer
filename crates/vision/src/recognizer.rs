@@ -71,6 +71,49 @@ impl Observation {
     pub fn cell(&self, square: Square) -> &Cell {
         &self.cells[usize::from(square)]
     }
+
+    /// Та же доска, прочитанная с другой стороны: каждое поле переходит в
+    /// симметричное относительно центра доски (a1 ↔ h8).
+    pub fn rotated(&self) -> Observation {
+        let mut cells = [Cell::default(); 64];
+        let mut board = Board::empty();
+        for square in Square::ALL {
+            let cell = *self.cell(square);
+            cells[usize::from(square.rotate_180())] = cell;
+            if let Some(piece) = cell.piece {
+                board.set_piece_at(square.rotate_180(), piece);
+            }
+        }
+        Observation {
+            cells,
+            board,
+            highlighted: self.highlighted.rotate_180(),
+            orientation: self.orientation.flipped(),
+            ..self.clone()
+        }
+    }
+
+    /// Какой стороной к зрителю стоит доска, судя по самим фигурам, — если
+    /// это очевидно (см. `white_bottom_balance`). `None`, когда фигуры
+    /// ничего определённого не говорят: в эндшпиле короли и редкие пешки
+    /// бывают где угодно.
+    pub fn evident_orientation(&self) -> Option<Orientation> {
+        let pieces = Square::ALL.into_iter().filter_map(|square| {
+            let cell = self.cell(square);
+            // Строка экрана, где стоит поле: 0 — верх.
+            let row = match self.orientation {
+                Orientation::WhiteBottom => 7 - square.rank() as usize,
+                Orientation::BlackBottom => square.rank() as usize,
+            };
+            Some((cell.piece?, cell.confidence, row))
+        });
+        let balance = white_bottom_balance(pieces);
+        (balance.abs() >= EVIDENT).then_some(if balance < 0.0 {
+            Orientation::BlackBottom
+        } else {
+            Orientation::WhiteBottom
+        })
+    }
 }
 
 #[derive(Debug, PartialEq, Eq, thiserror::Error)]
@@ -149,6 +192,12 @@ impl Recognizer {
     pub fn forget_grid(&mut self) {
         self.grid = None;
         self.palette = None;
+    }
+
+    /// Забыть ориентацию: на другой трансляции доска может стоять другой
+    /// стороной, и первый же кадр определит её заново.
+    pub fn forget_orientation(&mut self) {
+        self.orientation = None;
     }
 
     /// Ищет доску на кадре и запоминает её положение и цвета.
@@ -342,25 +391,41 @@ fn classify(patch: &Patch, background: Rgb, set: &PieceSet) -> (Option<Piece>, f
     (best.0, margin * quality)
 }
 
-/// Ориентация по распознанным фигурам: белые пешки и король живут ближе к
-/// своей стороне доски. Если не на что опереться — белые снизу.
+/// Ориентация по распознанным фигурам (см. [`white_bottom_balance`]). Если
+/// не на что опереться — белые снизу.
 fn infer_orientation(classified: &[(Option<Piece>, f32)]) -> Orientation {
-    let mut balance = 0.0;
-    for (index, (piece, confidence)) in classified.iter().enumerate() {
-        let Some(piece) = piece else { continue };
-        let weight = match piece.role {
-            Role::Pawn => 1.0,
-            Role::King => 3.0,
-            _ => 0.0,
-        } * confidence;
-        // Строка экрана от −3.5 (верх) до +3.5 (низ).
-        let row = (index / 8) as f32 - 3.5;
-        balance += match piece.color {
-            Color::White => weight * row,
-            Color::Black => -weight * row,
-        };
-    }
-    if balance < 0.0 { Orientation::BlackBottom } else { Orientation::WhiteBottom }
+    let pieces = classified
+        .iter()
+        .enumerate()
+        .filter_map(|(index, (piece, confidence))| Some(((*piece)?, *confidence, index / 8)));
+    if white_bottom_balance(pieces) < 0.0 { Orientation::BlackBottom } else { Orientation::WhiteBottom }
+}
+
+/// С этого перевеса ориентация по фигурам считается очевидной. У начальной
+/// позиции он около 60, в миттельшпиле — десятки, а в эндшпиле с
+/// королями в центре — единицы.
+const EVIDENT: f32 = 6.0;
+
+/// Насколько расстановка похожа на «белые снизу»: белые пешки и король
+/// живут ближе к своей стороне доски, чёрные — к своей. Больше нуля — белые
+/// снизу, меньше — сверху. Фигуры — с уверенностью распознавания и строкой
+/// экрана (0 — верх).
+fn white_bottom_balance(pieces: impl Iterator<Item = (Piece, f32, usize)>) -> f32 {
+    pieces
+        .map(|(piece, confidence, row)| {
+            let weight = match piece.role {
+                Role::Pawn => 1.0,
+                Role::King => 3.0,
+                _ => 0.0,
+            } * confidence;
+            // Строка экрана от −3.5 (верх) до +3.5 (низ).
+            let row = row as f32 - 3.5;
+            match piece.color {
+                Color::White => weight * row,
+                Color::Black => -weight * row,
+            }
+        })
+        .sum()
 }
 
 /// Начальная позиция узнаётся без шаблонов: заняты ровно две верхние и две
@@ -395,4 +460,61 @@ fn initial_position_orientation(scan: &Scan) -> Option<Orientation> {
         return None;
     }
     Some(if bottom > top { Orientation::WhiteBottom } else { Orientation::BlackBottom })
+}
+
+#[cfg(test)]
+mod tests {
+    use analyzer_chess::{Chess, Fen, Position};
+
+    use super::*;
+
+    /// Уверенно распознанная доска, прочитанная как «белые снизу».
+    fn observation(board: &Board) -> Observation {
+        let mut cells = [Cell { piece: None, confidence: 1.0, highlighted: false }; 64];
+        for square in Square::ALL {
+            cells[usize::from(square)].piece = board.piece_at(square);
+        }
+        Observation {
+            cells,
+            board: board.clone(),
+            highlighted: Bitboard::from(Square::E2),
+            orientation: Orientation::WhiteBottom,
+            mean_confidence: 1.0,
+            min_confidence: 1.0,
+            set: "test".into(),
+        }
+    }
+
+    #[test]
+    fn a_rotated_board_is_read_from_the_other_side() {
+        let start = observation(Chess::default().board());
+        let rotated = start.rotated();
+        assert_eq!(rotated.orientation, Orientation::BlackBottom);
+        // Белая ладья a1 оказалась на h8, подсветка e2 — на d7.
+        assert_eq!(rotated.board.piece_at(Square::H8), start.board.piece_at(Square::A1));
+        assert_eq!(rotated.cell(Square::H8).piece, start.board.piece_at(Square::A1));
+        assert_eq!(rotated.highlighted, Bitboard::from(Square::D7));
+        assert_eq!(rotated.rotated().board, start.board);
+    }
+
+    #[test]
+    fn pieces_tell_which_side_is_at_the_bottom() {
+        let start = observation(Chess::default().board());
+        assert_eq!(start.evident_orientation(), Some(Orientation::WhiteBottom));
+        // Партия с чёрными снизу, прочитанная как «белые снизу»: белые пешки
+        // на седьмой горизонтали, чёрные — на второй.
+        let upside_down = Observation { orientation: Orientation::WhiteBottom, ..start.rotated() };
+        assert_eq!(upside_down.evident_orientation(), Some(Orientation::BlackBottom));
+        // Ответ — про экран: прочитай ту же доску с другой стороны, белые на
+        // экране всё равно снизу.
+        assert_eq!(start.rotated().evident_orientation(), Some(Orientation::WhiteBottom));
+    }
+
+    #[test]
+    fn kings_in_the_centre_say_nothing() {
+        let fen: Fen = "8/8/8/3k4/4K3/8/8/8 w - - 0 1".parse().unwrap();
+        let endgame = observation(&fen.as_setup().board);
+        assert_eq!(endgame.evident_orientation(), None);
+        assert_eq!(endgame.rotated().evident_orientation(), None);
+    }
 }

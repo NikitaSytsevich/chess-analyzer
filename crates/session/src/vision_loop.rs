@@ -61,10 +61,17 @@ pub(crate) fn run(
                     let flipped = recognizer.orientation().unwrap_or_default().flipped();
                     recognizer.set_orientation(flipped);
                     tracker.reset();
+                    // Комментатор перевернул доску сам — трекер больше не
+                    // спорит с ним, пока трансляция та же.
+                    tracker.lock_orientation(true);
                 }
                 VisionControl::Relocate => {
+                    // Другая трансляция — и доска на ней может стоять другой
+                    // стороной.
                     recognizer.forget_grid();
+                    recognizer.forget_orientation();
                     tracker.reset();
+                    tracker.lock_orientation(false);
                 }
                 VisionControl::SetPosition(position) => {
                     let change = tracker.set_position(position);
@@ -94,7 +101,15 @@ pub(crate) fn run(
             }
         };
         if let Some(observation) = &observation {
-            for change in tracker.observe(observation, frame.captured_at()) {
+            let changes = tracker.observe(observation, frame.captured_at());
+            // Новую партию трекер мог начать с доски, прочитанной другой
+            // стороной, — следующие кадры распознаются уже так.
+            if let Some(orientation) = tracker.orientation()
+                && recognizer.orientation() != Some(orientation)
+            {
+                recognizer.set_orientation(orientation);
+            }
+            for change in changes {
                 // Позиция подтверждена правилами игры: выученный набор фигур
                 // доучивается на ней и становится точнее с каждым ходом.
                 if recognizer.active_set() == Some(LEARNED_SET)

@@ -175,3 +175,55 @@ fn another_game_on_screen_is_picked_up_after_a_pause() {
     assert!(position.castles().has(Color::White, analyzer_chess::CastlingSide::KingSide));
     assert!(position.castles().has(Color::Black, analyzer_chess::CastlingSide::QueenSide));
 }
+
+/// Доска, которую трансляция показывает чёрными снизу, а распознавание
+/// прочитало как «белые снизу»: каждое поле — симметричное настоящему.
+fn upside_down(board: &Board) -> Observation {
+    Observation { orientation: Orientation::WhiteBottom, ..observation(board, &[]).rotated() }
+}
+
+#[test]
+fn a_game_shown_from_blacks_side_starts_upright() {
+    let mut clock = Clock::new();
+    let events = clock.show(&upside_down(Chess::default().board()));
+    assert_eq!(events, [GameEvent::Started { position: Chess::default(), reason: StartReason::First }]);
+    assert_eq!(clock.tracker.orientation(), Some(Orientation::BlackBottom));
+}
+
+#[test]
+fn the_next_game_from_the_other_side_is_turned_over() {
+    // Партия белыми, потом в том же окне — партия чёрными: Lichess
+    // повернул доску, а распознавание всё ещё читает её белыми снизу.
+    let mut clock = Clock::new();
+    clock.show(&observation(Chess::default().board(), &[]));
+    let (board, lit) = clock.after(&["e2e4", "e7e5"]);
+    clock.show(&observation(&board, &lit));
+    assert_eq!(clock.tracker.orientation(), Some(Orientation::WhiteBottom));
+
+    let fen: Fen = "r1bqkbnr/pppppppp/2n5/8/3P4/8/PPP1PPPP/RNBQKBNR w KQkq - 1 2".parse().unwrap();
+    let next = fen.as_setup().board.clone();
+    let view = upside_down(&next);
+    let mut events = clock.show(&view);
+    for _ in 0..20 {
+        events.extend(clock.frame(&view));
+    }
+    let Some(GameEvent::Started { position, reason: StartReason::Resync }) = events.last() else {
+        panic!("expected a resync, got {events:?}");
+    };
+    // Пешки белых — на своей половине доски, а не на седьмой горизонтали.
+    assert_eq!(position.board(), &next);
+    assert_eq!(clock.tracker.orientation(), Some(Orientation::BlackBottom));
+}
+
+#[test]
+fn a_board_flipped_by_hand_stays_flipped() {
+    let mut clock = Clock::new();
+    clock.tracker.lock_orientation(true);
+    let view = upside_down(Chess::default().board());
+    let events = clock.show(&view);
+    let [GameEvent::Started { position, .. }] = events.as_slice() else {
+        panic!("expected a start, got {events:?}");
+    };
+    assert_eq!(position.board(), &view.board);
+    assert_eq!(clock.tracker.orientation(), Some(Orientation::WhiteBottom));
+}
