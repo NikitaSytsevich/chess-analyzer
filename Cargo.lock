@@ -198,6 +198,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "analyzer-tracker"
+version = "0.1.0"
+dependencies = [
+ "analyzer-chess",
+ "analyzer-vision",
+ "tracing",
+]
+
+[[package]]
 name = "analyzer-vision"
 version = "0.1.0"
 dependencies = [

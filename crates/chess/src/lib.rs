@@ -20,8 +20,8 @@ pub use shakmaty::san::{San, SanPlus};
 pub use shakmaty::uci::UciMove;
 pub use shakmaty::zobrist::Zobrist64;
 pub use shakmaty::{
-    Bitboard, Board, CastlingMode, Chess, Color, EnPassantMode, File, Move, Piece, Position, Rank, Role,
-    Square,
+    Bitboard, Board, CastlingMode, CastlingSide, Chess, Color, EnPassantMode, File, FromSetup, Move, Piece,
+    Position, PositionError, Rank, Role, Setup, Square,
 };
 
 /// Хеш Зобриста позиции — ключ кэша оценок: одна и та же позиция, пришедшая

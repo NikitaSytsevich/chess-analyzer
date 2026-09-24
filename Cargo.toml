@@ -17,6 +17,7 @@ publish = false
 analyzer-capture = { path = "crates/capture" }
 analyzer-chess = { path = "crates/chess" }
 analyzer-engine = { path = "crates/engine" }
+analyzer-tracker = { path = "crates/tracker" }
 analyzer-vision = { path = "crates/vision" }
 
 # GPUI ещё не 1.0 и ломает API между версиями — версия зафиксирована точно.
