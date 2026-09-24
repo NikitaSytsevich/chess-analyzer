@@ -3,27 +3,50 @@
 //! Движку уходит каждая новая позиция партии под своим [`PositionId`];
 //! обновления анализа кэшируются по хешу позиции (глубокая оценка не
 //! теряется при откате хода), а сыгранный ход сравнивается с лучшим ходом
-//! позиции до него — так появляются `?!`, `?`, `??` и подсказки.
+//! позиции до него — так появляются `!!`, `!`, `?!`, `?`, `??` и подсказки.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use analyzer_chess::{
-    Assessment, Chess, Game, Move, Notation, Position, Score, Thresholds, assess, is_only_move, position_hash,
+    Assessment, Chess, Game, Move, MoveClass, MoveContext, Notation, Position, Score, Thresholds, assess,
+    is_only_move, position_hash, standout,
 };
 use analyzer_engine::{AnalysisRequest, AnalysisUpdate, Engine, Line, PositionId};
 use analyzer_tracker::GameEvent;
 
 use crate::Event;
-use crate::hints::{HintKind, error_hint, mate_hint, mover_mates, only_move_hint};
+use crate::hints::{HintKind, error_hint, mate_hint, mover_mates, only_move_hint, standout_hint};
 
 /// Глубина, с которой оценке уже можно доверять для классификации хода…
 const ASSESS_DEPTH: u32 = 10;
+/// …с которой оценка позиции после хода устоялась и класс хода можно
+/// показывать: раньше он ещё скачет между «лучшим» и «неточностью». Ошибки и
+/// зевки — большие перепады оценки — надёжны и показываются сразу с
+/// `ASSESS_DEPTH`. С этой же глубины ход проверяется на блестящий и сильный.
+///
+/// Позиция до хода углубляется, только пока ход не сделан: в быстрой партии
+/// она успевает досчитаться до 10–12, и ждать от неё большего — значит не
+/// показать класс, пока ход последний. Поэтому устояться должна позиция
+/// после хода — её движок досчитывает…
+const SETTLED_DEPTH: u32 = 14;
 /// …и на которой классификация окончательная.
 const FINAL_DEPTH: u32 = 18;
 /// «Единственный ход» и мат объявляются не раньше этой глубины: на первых
 /// итерациях движок ещё путается.
 const HINT_DEPTH: u32 = 16;
+
+/// Класс хода и что о нём уже сказано интерфейсу.
+#[derive(Clone, Copy)]
+struct Assessed {
+    assessment: Assessment,
+    /// Лучший ход позиции до хода — чем стоило сыграть.
+    best: Option<Move>,
+    /// Класс больше не уточнится.
+    final_: bool,
+    /// Класс уже показан: дальше интерфейс узнаёт о каждом его изменении.
+    shown: bool,
+}
 
 /// Лучшее, что известно об оценке позиции.
 #[derive(Clone)]
@@ -42,7 +65,7 @@ pub(crate) struct Core {
     current: Option<(PositionId, u64)>,
     known: HashMap<u64, Known>,
     /// Классы ходов по номеру полухода (с единицы).
-    assessed: HashMap<usize, (Assessment, bool)>,
+    assessed: HashMap<usize, Assessed>,
     /// Подсказки не повторяются: одна и та же мысль — один раз на позицию.
     hinted: HashSet<(u64, HintKindKey)>,
 }
@@ -50,6 +73,7 @@ pub(crate) struct Core {
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 enum HintKindKey {
     Error,
+    Standout,
     OnlyMove,
     Mate,
 }
@@ -135,12 +159,13 @@ impl Core {
 
     /// Класс последнего хода по лучшим известным оценкам до и после него.
     fn assess_last(&mut self, out: &mut Vec<Event>) {
-        let Some(game) = &self.game else { return };
+        let Some(game) = self.game.clone() else { return };
         let ply = game.len();
         if ply == 0 {
             return;
         }
-        if self.assessed.get(&ply).is_some_and(|(_, final_)| *final_) {
+        let previous = self.assessed.get(&ply).copied();
+        if previous.is_some_and(|previous| previous.final_) {
             return;
         }
         let before = game.position(ply - 1);
@@ -155,63 +180,87 @@ impl Core {
         }
         let (Some(best_before), Some(best_after)) = (was.lines.first(), now.lines.first()) else { return };
         let played = game.plies()[ply - 1].mv;
-        let best_move = best_before.moves.first().copied();
-        let assessment = assess(
+        let best = best_before.moves.first().copied();
+        let mut assessment = assess(
             before.turn(),
             best_before.score,
             best_after.score,
-            best_move == Some(played),
+            best == Some(played),
             &self.thresholds,
         );
+        let settled = now.depth >= SETTLED_DEPTH;
+        if settled {
+            let context = MoveContext {
+                before,
+                played,
+                previous: ply.checked_sub(2).map(|index| game.plies()[index].mv),
+                best: best_before.score,
+                second: was.lines.get(1).map(|line| line.score),
+                after: best_after.score,
+                reply: &best_after.moves,
+            };
+            if let Some(class) = standout(assessment.class, &context, &self.thresholds) {
+                assessment.class = class;
+            }
+        }
         let final_ = now.depth >= FINAL_DEPTH && was.depth >= FINAL_DEPTH.min(ASSESS_DEPTH + 4);
-        let changed = self.assessed.get(&ply).is_none_or(|(old, _)| old.class != assessment.class);
-        self.assessed.insert(ply, (assessment, final_));
-        if changed || final_ {
-            out.push(Event::Assessment { ply, assessment, best: best_move, final_ });
+        // Показанный класс дальше только уточняется; новый показывается,
+        // когда устоялся, — или сразу, если это ошибка или зевок.
+        let shown = previous.is_some_and(|previous| previous.shown)
+            || settled
+            || final_
+            || assessment.class >= MoveClass::Mistake;
+        let changed =
+            previous.is_none_or(|previous| !previous.shown || previous.assessment.class != assessment.class);
+        self.assessed.insert(ply, Assessed { assessment, best, final_, shown });
+        if shown && (changed || final_) {
+            out.push(Event::Assessment { ply, assessment, best, final_ });
         }
         if final_ {
-            self.error_hint(ply, before.clone(), played, best_move, &assessment, out);
+            self.move_hints(ply, before, played, best, &assessment, out);
         }
     }
 
     /// Ход `ply` больше не уточнится: сообщаем, каким он остался.
     fn finalize(&mut self, ply: usize, out: &mut Vec<Event>) {
-        let Some((assessment, final_)) = self.assessed.get(&ply).copied() else { return };
-        if final_ {
+        let Some(entry) = self.assessed.get(&ply).copied() else { return };
+        if entry.final_ {
             return;
         }
-        self.assessed.insert(ply, (assessment, true));
-        let Some(game) = &self.game else { return };
+        self.assessed.insert(ply, Assessed { final_: true, shown: true, ..entry });
+        let Some(game) = self.game.clone() else { return };
         if ply == 0 || ply > game.len() {
             return;
         }
-        let before = game.position(ply - 1).clone();
         let played = game.plies()[ply - 1].mv;
-        let best = self
-            .known
-            .get(&position_hash(&before))
-            .and_then(|k| k.lines.first())
-            .and_then(|l| l.moves.first().copied());
-        out.push(Event::Assessment { ply, assessment, best, final_: true });
-        self.error_hint(ply, before, played, best, &assessment, out);
+        out.push(Event::Assessment { ply, assessment: entry.assessment, best: entry.best, final_: true });
+        self.move_hints(ply, game.position(ply - 1), played, entry.best, &entry.assessment, out);
     }
 
-    fn error_hint(
+    /// Подсказки об окончательно оценённом ходе: блестящий, сильный, ошибка
+    /// или зевок — каждая один раз.
+    fn move_hints(
         &mut self,
         ply: usize,
-        before: Chess,
+        before: &Chess,
         played: Move,
         best: Option<Move>,
         assessment: &Assessment,
         out: &mut Vec<Event>,
     ) {
-        if assessment.class < analyzer_chess::MoveClass::Mistake {
-            return;
-        }
-        if !self.hinted.insert((position_hash(&before) ^ ply as u64, HintKindKey::Error)) {
-            return;
-        }
-        if let Some(hint) = error_hint(ply, &before, played, best, assessment, self.notation) {
+        let (kind, hint) = match assessment.class {
+            MoveClass::Brilliant | MoveClass::Great => (
+                HintKindKey::Standout,
+                standout_hint(ply, before, played, assessment.class, assessment.after, self.notation),
+            ),
+            MoveClass::Mistake | MoveClass::Blunder => {
+                (HintKindKey::Error, error_hint(ply, before, played, best, assessment, self.notation))
+            }
+            MoveClass::Best | MoveClass::Good | MoveClass::Inaccuracy => return,
+        };
+        if let Some(hint) = hint
+            && self.hinted.insert((position_hash(before) ^ ply as u64, kind))
+        {
             out.push(Event::Hint(hint));
         }
     }

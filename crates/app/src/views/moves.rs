@@ -118,6 +118,8 @@ fn move_row(number: Option<u32>, mut cells: Vec<AnyElement>) -> AnyElement {
 pub fn hints_card(hints: &VecDeque<Hint>) -> impl IntoElement {
     let items = hints.iter().take(4).enumerate().map(|(index, hint)| {
         let (color, label) = match hint.kind {
+            HintKind::Brilliant => (theme::BRILLIANT, "!!"),
+            HintKind::Great => (theme::GREAT, "!"),
             HintKind::Blunder => (theme::BLUNDER, "??"),
             HintKind::Mistake => (theme::MISTAKE, "?"),
             HintKind::OnlyMove => (theme::GOOD, "!"),

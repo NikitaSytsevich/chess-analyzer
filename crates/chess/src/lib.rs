@@ -10,7 +10,7 @@ mod game;
 mod notation;
 mod pgn;
 
-pub use assess::{Assessment, MoveClass, Thresholds, assess, is_only_move};
+pub use assess::{Assessment, MoveClass, MoveContext, Thresholds, assess, is_only_move, standout};
 pub use eval::{Score, Wdl, expected_score};
 pub use game::{Ending, Game, IllegalMove, Ply};
 pub use notation::{Notation, format_san, line_text, move_prefix, san_text};

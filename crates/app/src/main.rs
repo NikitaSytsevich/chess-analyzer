@@ -25,9 +25,12 @@ fn main() {
                 .unwrap_or_else(|_| "info,analyzer=debug".into()),
         )
         .init();
+    // `--demo` — сразу «Оперная партия»: посмотреть анализатор (или
+    // проверить изменения интерфейса) без трансляции и без лишних кликов.
+    let demo = std::env::args().any(|arg| arg == "--demo");
 
     // Полный каталог иконок Lucide: без источника ресурсов иконки не рисуются.
-    gpui_kit::application().with_assets(gpui_kit::assets::AllAssets).run(|cx| {
+    gpui_kit::application().with_assets(gpui_kit::assets::AllAssets).run(move |cx| {
         gpui_kit::init(cx);
         theme::apply(cx);
         cx.bind_keys(workspace::key_bindings());
@@ -37,9 +40,15 @@ fn main() {
             window_min_size: Some(size(px(340.), px(400.))),
             ..TitleBar::window_options()
         };
-        cx.open_window(options, |window, cx| {
+        cx.open_window(options, move |window, cx| {
             window.set_window_title("Шахматный анализатор");
-            let view = cx.new(|cx| Workspace::new(window, cx));
+            let view = cx.new(|cx| {
+                let mut workspace = Workspace::new(window, cx);
+                if demo {
+                    workspace.start_demo(cx);
+                }
+                workspace
+            });
             cx.new(|cx| Root::new(view, window, cx))
         })
         .expect("failed to open the main window");

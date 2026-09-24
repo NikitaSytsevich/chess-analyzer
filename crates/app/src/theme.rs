@@ -37,6 +37,13 @@ pub const MISTAKE: u32 = 0xE8813A;
 pub const BLUNDER: u32 = 0xE5534B;
 pub const INFO: u32 = 0x6AA7E8;
 
+/// Классы хороших ходов — в той логике, к которой приучил Chess.com:
+/// бирюзовый блестящий, синий сильный, зелёные лучший и хороший.
+pub const BRILLIANT: u32 = 0x26BFA5;
+pub const GREAT: u32 = 0x5E95D4;
+pub const BEST: u32 = 0x7DB24F;
+pub const DECENT: u32 = 0x93AD7B;
+
 /// Доска — спокойное дерево, чуть светлее и холоднее классической
 /// коричневой, чтобы стрелки и подсветка читались поверх неё.
 pub const BOARD_LIGHT: u32 = 0xE9DCC0;
@@ -53,12 +60,20 @@ pub const MONO: &str = crate::platform::MONO_FONT;
 
 /// Цвет класса хода.
 pub fn class_color(class: analyzer_chess::MoveClass) -> Hsla {
+    hex(class_rgb(class))
+}
+
+/// Цвет класса хода числом `0xRRGGBB` — для полупрозрачной подсветки клеток.
+pub fn class_rgb(class: analyzer_chess::MoveClass) -> u32 {
     use analyzer_chess::MoveClass;
     match class {
-        MoveClass::Best | MoveClass::Good => hex(MUTED),
-        MoveClass::Inaccuracy => hex(INACCURACY),
-        MoveClass::Mistake => hex(MISTAKE),
-        MoveClass::Blunder => hex(BLUNDER),
+        MoveClass::Brilliant => BRILLIANT,
+        MoveClass::Great => GREAT,
+        MoveClass::Best => BEST,
+        MoveClass::Good => DECENT,
+        MoveClass::Inaccuracy => INACCURACY,
+        MoveClass::Mistake => MISTAKE,
+        MoveClass::Blunder => BLUNDER,
     }
 }
 

@@ -5,7 +5,9 @@
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 
-use analyzer_chess::{Assessment, CastlingMode, Color, Ending, Game, Move, Notation, Score, Square, UciMove};
+use analyzer_chess::{
+    Assessment, CastlingMode, Color, Ending, Game, Move, MoveClass, Notation, Score, Square, UciMove,
+};
 use analyzer_engine::AnalysisUpdate;
 use analyzer_session::{Event, GameEvent, Hint, RecognitionStatus};
 
@@ -106,6 +108,15 @@ impl Model {
             _ => None,
         }
     }
+
+    /// Класс последнего хода для значка на доске: номер полухода, клетка,
+    /// куда пошла фигура, и класс. `None`, пока класс не устоялся.
+    pub fn last_badge(&self) -> Option<(usize, Square, MoveClass)> {
+        let ply = self.game.as_ref()?.len();
+        let (assessment, _) = self.assessments.get(&ply)?;
+        let (_, to) = self.last_move()?;
+        Some((ply, to, assessment.class))
+    }
 }
 
 /// Доля белых на шкале оценки: `0.5` — равенство. Та же кривая, что и у
@@ -185,6 +196,31 @@ mod tests {
         model.apply(Event::Game { game: mated, change: GameEvent::Moved { ply: 4, mv, san } });
         assert_eq!(model.ending(), Some(Ending::Checkmate { winner: Color::Black }));
         assert_eq!(model.bar_target(), 0.0);
+    }
+
+    #[test]
+    fn the_badge_belongs_to_the_last_move_only() {
+        let mut model = Model::default();
+        let two = game(&["e2e4", "e7e5"]);
+        let (mv, san) = (two.plies()[1].mv, two.plies()[1].san);
+        model.apply(Event::Game { game: two, change: GameEvent::Moved { ply: 2, mv, san } });
+        assert_eq!(model.last_badge(), None, "no badge until the move is assessed");
+
+        let assessment = analyzer_chess::assess(
+            Color::Black,
+            Score::Cp(20),
+            Score::Cp(20),
+            true,
+            &analyzer_chess::Thresholds::default(),
+        );
+        model.apply(Event::Assessment { ply: 2, assessment, best: None, final_: false });
+        assert_eq!(model.last_badge(), Some((2, Square::E5, MoveClass::Best)));
+
+        // Следующий ход ещё не оценён — значок прежнего с доски уходит.
+        let three = game(&["e2e4", "e7e5", "g1f3"]);
+        let (mv, san) = (three.plies()[2].mv, three.plies()[2].san);
+        model.apply(Event::Game { game: three, change: GameEvent::Moved { ply: 3, mv, san } });
+        assert_eq!(model.last_badge(), None);
     }
 
     #[test]

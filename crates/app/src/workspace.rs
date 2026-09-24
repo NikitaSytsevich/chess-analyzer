@@ -29,7 +29,7 @@ use crate::pieces::PieceImages;
 use crate::platform::{self, Unpinned};
 use crate::theme::{self, hex};
 use crate::views::analysis::{ending_text, eval_bar, lines_card, score_card, verdict};
-use crate::views::board::{BoardProps, board};
+use crate::views::board::{Badge, BoardProps, board};
 use crate::views::graph::eval_graph;
 use crate::views::moves::{hints_card, moves_card};
 use crate::views::{chip, measure};
@@ -322,7 +322,7 @@ impl Workspace {
 
     /// «Оперная партия» синтетическими кадрами через весь конвейер — чтобы
     /// посмотреть анализатор без трансляции.
-    fn start_demo(&mut self, cx: &mut Context<Self>) {
+    pub fn start_demo(&mut self, cx: &mut Context<Self>) {
         self.stop_capture(cx);
         self.send(Command::Relocate);
         self.demo = Some(Demo::start(Arc::clone(&self.session_slot), Duration::from_secs(3)));
@@ -1046,6 +1046,7 @@ impl Workspace {
             unsure,
             pieces: self.pieces.as_ref(),
             measured: Rc::clone(&self.board_measured),
+            badge: self.model.last_badge().map(|(ply, square, class)| Badge { ply, square, class }),
         });
 
         div()

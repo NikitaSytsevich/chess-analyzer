@@ -2,13 +2,15 @@
 //! эфир. Только шаблоны и факты анализа, ничего выдуманного.
 
 use analyzer_chess::{
-    Assessment, Chess, Color, Move, Notation, Position, Score, expected_score, line_text, move_prefix,
-    san_text,
+    Assessment, Chess, Color, Move, MoveClass, Notation, Position, Role, Score, expected_score, line_text,
+    move_prefix, san_text,
 };
 
 /// Вид подсказки — для значка и цвета в интерфейсе.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HintKind {
+    Brilliant,
+    Great,
     Mistake,
     Blunder,
     OnlyMove,
@@ -67,6 +69,44 @@ pub(crate) fn error_hint(
         text.push_str(&format!(". Сильнее {prefix}{}", san_text(before, best, notation)));
     }
     Some(Hint { ply, kind, text })
+}
+
+/// «16.Фb8+!! — блестящий ход: жертва ферзя ради мата», «7.Сc4! — сильный
+/// ход: единственный, и он найден».
+pub(crate) fn standout_hint(
+    ply: usize,
+    before: &Chess,
+    played: Move,
+    class: MoveClass,
+    after: Score,
+    notation: Notation,
+) -> Option<Hint> {
+    let (kind, detail) = match class {
+        MoveClass::Brilliant => {
+            let piece = match played.role() {
+                Role::Queen => "ферзя",
+                Role::Rook => "ладьи",
+                Role::Bishop => "слона",
+                Role::Knight => "коня",
+                Role::Pawn | Role::King => "фигуры",
+            };
+            let aim = if mover_mates(before, after) { " ради мата" } else { "" };
+            (HintKind::Brilliant, format!("жертва {piece}{aim}"))
+        }
+        MoveClass::Great => (HintKind::Great, "единственный, и он найден".to_owned()),
+        _ => return None,
+    };
+    Some(Hint {
+        ply,
+        kind,
+        text: format!(
+            "{}{}{} — {}: {detail}",
+            move_prefix(before),
+            san_text(before, played, notation),
+            class.symbol()?,
+            class.word()?
+        ),
+    })
 }
 
 /// «У чёрных единственный ход: 24…Кf6». Если и второй ход не хуже
