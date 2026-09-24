@@ -6,9 +6,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use analyzer_capture::{
-    CaptureConfig, CaptureError, CaptureSession, FrameSlot, Source, pick_source,
-};
+use analyzer_capture::{CaptureConfig, CaptureError, CaptureSession, FrameSlot, Source, pick_source};
 use analyzer_vision::Frame;
 use gpui_kit::component::Root;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
@@ -36,10 +34,7 @@ impl Spike {
         let (tx, rx) = flume::unbounded::<Message>();
         cx.spawn_in(window, async move |this, cx| {
             while let Ok(message) = rx.recv_async().await {
-                if this
-                    .update_in(cx, |this, window, cx| this.handle(message, window, cx))
-                    .is_err()
-                {
+                if this.update_in(cx, |this, window, cx| this.handle(message, window, cx)).is_err() {
                     break;
                 }
             }
@@ -49,13 +44,8 @@ impl Spike {
         // каждый кадр — это новая текстура в атласе GPUI.
         cx.spawn_in(window, async move |this, cx| {
             loop {
-                cx.background_executor()
-                    .timer(Duration::from_millis(200))
-                    .await;
-                if this
-                    .update_in(cx, |this, window, cx| this.refresh_preview(window, cx))
-                    .is_err()
-                {
+                cx.background_executor().timer(Duration::from_millis(200)).await;
+                if this.update_in(cx, |this, window, cx| this.refresh_preview(window, cx)).is_err() {
                     break;
                 }
             }
@@ -146,11 +136,7 @@ fn render_image(frame: &Frame) -> RenderImage {
 
 impl Render for Spike {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let stats = self
-            .session
-            .as_ref()
-            .map(CaptureSession::stats)
-            .unwrap_or_default();
+        let stats = self.session.as_ref().map(CaptureSession::stats).unwrap_or_default();
         let (w, h) = self.preview_size;
         div()
             .size_full()
@@ -169,28 +155,14 @@ impl Render for Spike {
                         .on_click(cx.listener(|this, _, _, cx| this.pick(cx))),
                 ),
             )
-            .child(
-                div()
-                    .text_sm()
-                    .text_color(rgb(0x9a9890))
-                    .child(self.status.clone()),
-            )
+            .child(div().text_sm().text_color(rgb(0x9a9890)).child(self.status.clone()))
             .child(div().text_sm().text_color(rgb(0x9a9890)).child(format!(
                 "кадров: {} · без изменений: {} · последний: {w}×{h}",
                 stats.frames, stats.idle
             )))
-            .child(
-                div()
-                    .flex_1()
-                    .rounded_lg()
-                    .bg(rgb(0x0f1012))
-                    .overflow_hidden()
-                    .children(
-                        self.preview
-                            .clone()
-                            .map(|image| img(image).size_full().object_fit(ObjectFit::Contain)),
-                    ),
-            )
+            .child(div().flex_1().rounded_lg().bg(rgb(0x0f1012)).overflow_hidden().children(
+                self.preview.clone().map(|image| img(image).size_full().object_fit(ObjectFit::Contain)),
+            ))
     }
 }
 

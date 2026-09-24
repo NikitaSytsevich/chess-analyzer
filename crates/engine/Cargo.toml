@@ -1,0 +1,18 @@
+[package]
+name = "analyzer-engine"
+description = "UCI-клиент Stockfish: анализ позиций в отдельном потоке"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[dependencies]
+analyzer-chess.workspace = true
+flume.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[lints]
+workspace = true

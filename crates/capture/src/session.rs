@@ -22,12 +22,7 @@ pub struct RegionF {
 }
 
 impl RegionF {
-    pub const FULL: Self = Self {
-        x: 0.0,
-        y: 0.0,
-        width: 1.0,
-        height: 1.0,
-    };
+    pub const FULL: Self = Self { x: 0.0, y: 0.0, width: 1.0, height: 1.0 };
 
     /// Та же область с полем `margin` (доля её размера) с каждой стороны,
     /// обрезанная по границам окна. Поле нужно, чтобы распознавание само
@@ -62,12 +57,7 @@ pub struct CaptureConfig {
 
 impl Default for CaptureConfig {
     fn default() -> Self {
-        Self {
-            fps: 10,
-            region: None,
-            max_side_region: 640,
-            max_side_full: 1920,
-        }
+        Self { fps: 10, region: None, max_side_region: 640, max_side_full: 1920 }
     }
 }
 
@@ -103,11 +93,8 @@ impl CaptureSession {
     ) -> Result<Self, CaptureError> {
         let counters = Arc::new(Counters::default());
         let callbacks = StreamCallbacks::new().on_stop(on_stop);
-        let mut stream = SCStream::new_with_delegate(
-            &source.filter,
-            &stream_config(&source, &config),
-            callbacks,
-        );
+        let mut stream =
+            SCStream::new_with_delegate(&source.filter, &stream_config(&source, &config), callbacks);
 
         let handler_counters = Arc::clone(&counters);
         stream.add_output_handler(
@@ -130,16 +117,9 @@ impl CaptureSession {
             },
             SCStreamOutputType::Screen,
         );
-        stream
-            .start_capture()
-            .map_err(|error| CaptureError::Stream(error.to_string()))?;
+        stream.start_capture().map_err(|error| CaptureError::Stream(error.to_string()))?;
         tracing::info!(title = %source.title, ?config, "capture started");
-        Ok(Self {
-            stream,
-            source,
-            config: Mutex::new(config),
-            counters,
-        })
+        Ok(Self { stream, source, config: Mutex::new(config), counters })
     }
 
     pub fn source(&self) -> &Source {
@@ -149,10 +129,7 @@ impl CaptureSession {
     /// Переключает захват на область окна (или на окно целиком) без
     /// перезапуска потока.
     pub fn set_region(&self, region: Option<RegionF>) -> Result<(), CaptureError> {
-        let mut config = self
-            .config
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut config = self.config.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         config.region = region;
         self.stream
             .update_configuration(&stream_config(&self.source, &config))
@@ -184,13 +161,7 @@ fn frame_from_sample(sample: &CMSampleBuffer) -> Option<Frame> {
     // SAFETY: буфер заблокирован на чтение до конца жизни `guard`, а срез
     // копируется в кадр раньше, чем `guard` будет отпущен.
     let bytes = unsafe { guard.as_slice() }?;
-    Some(Frame::from_strided(
-        width,
-        height,
-        bytes_per_row,
-        bytes,
-        Instant::now(),
-    ))
+    Some(Frame::from_strided(width, height, bytes_per_row, bytes, Instant::now()))
 }
 
 fn stream_config(source: &Source, config: &CaptureConfig) -> SCStreamConfiguration {
@@ -198,11 +169,7 @@ fn stream_config(source: &Source, config: &CaptureConfig) -> SCStreamConfigurati
     let region = config.region.unwrap_or(RegionF::FULL);
     let (rect_w, rect_h) = (region.width * window_w, region.height * window_h);
     let rect = CGRect::new(region.x * window_w, region.y * window_h, rect_w, rect_h);
-    let max_side = if config.region.is_some() {
-        config.max_side_region
-    } else {
-        config.max_side_full
-    };
+    let max_side = if config.region.is_some() { config.max_side_region } else { config.max_side_full };
     let (width, height) = fit_pixels(rect_w * source.scale, rect_h * source.scale, max_side);
 
     let mut stream_config = SCStreamConfiguration::new()
@@ -223,10 +190,7 @@ fn stream_config(source: &Source, config: &CaptureConfig) -> SCStreamConfigurati
 fn fit_pixels(width: f64, height: f64, max_side: u32) -> (u32, u32) {
     let longest = width.max(height).max(1.0);
     let scale = (f64::from(max_side) / longest).min(1.0);
-    (
-        (width * scale).round().max(1.0) as u32,
-        (height * scale).round().max(1.0) as u32,
-    )
+    ((width * scale).round().max(1.0) as u32, (height * scale).round().max(1.0) as u32)
 }
 
 #[cfg(test)]
@@ -235,13 +199,7 @@ mod tests {
 
     #[test]
     fn a_margin_never_leaves_the_window() {
-        let region = RegionF {
-            x: 0.02,
-            y: 0.5,
-            width: 0.4,
-            height: 0.4,
-        }
-        .with_margin(0.1);
+        let region = RegionF { x: 0.02, y: 0.5, width: 0.4, height: 0.4 }.with_margin(0.1);
         assert!((region.x - 0.0).abs() < 1e-9);
         assert!((region.y - 0.46).abs() < 1e-9);
         assert!((region.x + region.width - 0.46).abs() < 1e-9);

@@ -1,6 +1,6 @@
 use screencapturekit::content_sharing_picker::{
-    SCContentSharingPicker, SCContentSharingPickerConfiguration, SCContentSharingPickerMode,
-    SCPickedSource, SCPickerOutcome,
+    SCContentSharingPicker, SCContentSharingPickerConfiguration, SCContentSharingPickerMode, SCPickedSource,
+    SCPickerOutcome,
 };
 use screencapturekit::prelude::SCContentFilter;
 
@@ -20,10 +20,7 @@ pub struct Source {
 
 impl Source {
     pub fn pixel_size(&self) -> (u32, u32) {
-        (
-            (self.size_points.0 * self.scale).round() as u32,
-            (self.size_points.1 * self.scale).round() as u32,
-        )
+        ((self.size_points.0 * self.scale).round() as u32, (self.size_points.1 * self.scale).round() as u32)
     }
 }
 

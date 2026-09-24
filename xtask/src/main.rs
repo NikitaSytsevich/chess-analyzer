@@ -44,10 +44,7 @@ fn main() -> Result<()> {
 }
 
 fn root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .expect("xtask lives in the workspace")
-        .to_path_buf()
+    Path::new(env!("CARGO_MANIFEST_DIR")).parent().expect("xtask lives in the workspace").to_path_buf()
 }
 
 fn cmd(program: &str) -> Command {
@@ -57,13 +54,8 @@ fn cmd(program: &str) -> Command {
 }
 
 fn run_checked(command: &mut Command) -> Result<()> {
-    let status = command
-        .status()
-        .with_context(|| format!("не удалось запустить {command:?}"))?;
-    ensure!(
-        status.success(),
-        "команда завершилась с ошибкой: {command:?}"
-    );
+    let status = command.status().with_context(|| format!("не удалось запустить {command:?}"))?;
+    ensure!(status.success(), "команда завершилась с ошибкой: {command:?}");
     Ok(())
 }
 
@@ -79,12 +71,7 @@ fn fetch_stockfish() -> Result<PathBuf> {
     let archive = downloads.join("stockfish-macos-universal.tar.gz");
 
     println!("Загружаю Stockfish 19 (82 МБ)…");
-    run_checked(
-        cmd("curl")
-            .args(["-fL", "--progress-bar", "-o"])
-            .arg(&archive)
-            .arg(STOCKFISH_URL),
-    )?;
+    run_checked(cmd("curl").args(["-fL", "--progress-bar", "-o"]).arg(&archive).arg(STOCKFISH_URL))?;
 
     let output = cmd("shasum").args(["-a", "256"]).arg(&archive).output()?;
     let digest = String::from_utf8_lossy(&output.stdout);
@@ -109,12 +96,7 @@ fn fetch_stockfish() -> Result<PathBuf> {
     fs::create_dir_all(&dir)?;
     // Универсальная сборка содержит и x86_64, и arm64. Приложение только
     // для Apple Silicon: вторая половина — лишние десятки мегабайт.
-    run_checked(
-        cmd("lipo")
-            .arg(&universal)
-            .args(["-thin", "arm64", "-output"])
-            .arg(&binary),
-    )?;
+    run_checked(cmd("lipo").arg(&universal).args(["-thin", "arm64", "-output"]).arg(&binary))?;
     if let Some(license) = find_file(&unpacked, |path| {
         path.file_name()
             .and_then(|name| name.to_str())
@@ -159,19 +141,13 @@ fn bundle(release: bool) -> Result<PathBuf> {
     fs::create_dir_all(contents.join("MacOS"))?;
     fs::create_dir_all(contents.join("Resources/engines"))?;
 
-    fs::copy(
-        target.join(EXECUTABLE),
-        contents.join("MacOS").join(EXECUTABLE),
-    )?;
+    fs::copy(target.join(EXECUTABLE), contents.join("MacOS").join(EXECUTABLE))?;
     let engine = contents.join("Resources/engines/stockfish");
     fs::copy(&stockfish, &engine)?;
     if let Some(dir) = stockfish.parent() {
         let license = dir.join("COPYING.txt");
         if license.exists() {
-            fs::copy(
-                license,
-                contents.join("Resources/engines/STOCKFISH-COPYING.txt"),
-            )?;
+            fs::copy(license, contents.join("Resources/engines/STOCKFISH-COPYING.txt"))?;
         }
     }
     fs::write(contents.join("Info.plist"), info_plist())?;
@@ -179,11 +155,7 @@ fn bundle(release: bool) -> Result<PathBuf> {
     // Подпись ad-hoc, изнутри наружу: сначала вложенный движок, потом само
     // приложение. Системный выбор окна не требует разрешения «Запись экрана»,
     // поэтому постоянный сертификат не нужен.
-    run_checked(
-        cmd("codesign")
-            .args(["--force", "--sign", "-"])
-            .arg(&engine),
-    )?;
+    run_checked(cmd("codesign").args(["--force", "--sign", "-"]).arg(&engine))?;
     run_checked(cmd("codesign").args(["--force", "--sign", "-"]).arg(&app))?;
     Ok(app)
 }
@@ -220,20 +192,11 @@ fn run(release: bool) -> Result<()> {
     let app = bundle(release)?;
     // Исполняемый файл внутри .app запускаем напрямую: так журнал идёт в
     // терминал, а macOS всё равно видит приложение с его Info.plist.
-    run_checked(&mut Command::new(
-        app.join("Contents/MacOS").join(EXECUTABLE),
-    ))
+    run_checked(&mut Command::new(app.join("Contents/MacOS").join(EXECUTABLE)))
 }
 
 fn ci() -> Result<()> {
     run_checked(cmd("cargo").args(["fmt", "--all", "--check"]))?;
-    run_checked(cmd("cargo").args([
-        "clippy",
-        "--workspace",
-        "--all-targets",
-        "--",
-        "-D",
-        "warnings",
-    ]))?;
+    run_checked(cmd("cargo").args(["clippy", "--workspace", "--all-targets", "--", "-D", "warnings"]))?;
     run_checked(cmd("cargo").args(["test", "--workspace"]))
 }

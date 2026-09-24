@@ -31,10 +31,7 @@ impl FrameSlot {
     }
 
     pub fn put(&self, frame: Frame) {
-        let mut state = self
-            .state
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut state = self.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         state.frame = Some(frame);
         state.seq += 1;
         self.ready.notify_all();
@@ -43,10 +40,7 @@ impl FrameSlot {
     /// Ждёт кадр новее `after` не дольше `timeout`. `None` — кадра не было
     /// или ячейку закрыли.
     pub fn wait_newer(&self, after: u64, timeout: Duration) -> Option<(u64, Frame)> {
-        let state = self
-            .state
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let state = self.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let (state, _) = self
             .ready
             .wait_timeout_while(state, timeout, |s| s.seq <= after && !s.closed)
@@ -59,19 +53,13 @@ impl FrameSlot {
 
     /// Последний кадр без ожидания.
     pub fn latest(&self) -> Option<(u64, Frame)> {
-        let state = self
-            .state
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let state = self.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         state.frame.clone().map(|frame| (state.seq, frame))
     }
 
     /// Будит всех ждущих и больше не отдаёт кадров: захват остановлен.
     pub fn close(&self) {
-        let mut state = self
-            .state
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut state = self.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         state.closed = true;
         self.ready.notify_all();
     }

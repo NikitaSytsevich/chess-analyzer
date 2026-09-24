@@ -20,17 +20,8 @@ impl Frame {
     /// Если длина буфера не равна `width * height * 4`.
     pub fn new(width: u32, height: u32, data: impl Into<Arc<[u8]>>, captured_at: Instant) -> Self {
         let data = data.into();
-        assert_eq!(
-            data.len(),
-            width as usize * height as usize * 4,
-            "BGRA buffer size mismatch"
-        );
-        Self {
-            width,
-            height,
-            data,
-            captured_at,
-        }
+        assert_eq!(data.len(), width as usize * height as usize * 4, "BGRA buffer size mismatch");
+        Self { width, height, data, captured_at }
     }
 
     /// Кадр из буфера, у которого строка длиннее `width * 4` байт — так их
@@ -45,10 +36,7 @@ impl Frame {
     ) -> Self {
         let row = width as usize * 4;
         assert!(bytes_per_row >= row, "stride is shorter than a row");
-        assert!(
-            src.len() >= bytes_per_row * (height as usize - 1) + row,
-            "strided buffer is too short"
-        );
+        assert!(src.len() >= bytes_per_row * (height as usize - 1) + row, "strided buffer is too short");
         let mut data = Vec::with_capacity(row * height as usize);
         for y in 0..height as usize {
             data.extend_from_slice(&src[y * bytes_per_row..y * bytes_per_row + row]);
@@ -81,12 +69,7 @@ impl Frame {
     /// Пиксель `(x, y)` как `[b, g, r, a]`.
     pub fn pixel(&self, x: u32, y: u32) -> [u8; 4] {
         let i = (y as usize * self.width as usize + x as usize) * 4;
-        [
-            self.data[i],
-            self.data[i + 1],
-            self.data[i + 2],
-            self.data[i + 3],
-        ]
+        [self.data[i], self.data[i + 1], self.data[i + 2], self.data[i + 3]]
     }
 }
 

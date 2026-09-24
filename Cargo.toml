@@ -15,12 +15,16 @@ publish = false
 # Собственные крейты. Зависимости идут строго в одну сторону:
 # app → session → {tracker → {vision, chess}, engine → chess, capture → vision}.
 analyzer-capture = { path = "crates/capture" }
+analyzer-chess = { path = "crates/chess" }
+analyzer-engine = { path = "crates/engine" }
+analyzer-vision = { path = "crates/vision" }
 
 # GPUI ещё не 1.0 и ломает API между версиями — версия зафиксирована точно.
 # gpui-kit включает runtime_shaders: шейдеры Metal собираются при запуске,
 # поэтому для сборки хватает Command Line Tools, Xcode не нужен.
 gpui-kit = "=0.6.6"
 screencapturekit = { version = "10.0.3", features = ["macos_15_0"] }
+shakmaty = "0.30.1"
 
 anyhow = "1.0.104"
 thiserror = "2.0.21"
