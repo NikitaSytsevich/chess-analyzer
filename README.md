@@ -102,7 +102,8 @@ crates/
   session   всё вместе: кадры → партия → анализ → подсказки
   app       окно на GPUI
   cli       тот же конвейер в терминале: `cargo run -p analyzer-cli -- demo`
-xtask/      загрузка Stockfish, упаковка приложения, проверки
+xtask/      загрузка Stockfish, иконка (`cargo xtask icons` из assets/icon/icon.svg),
+            упаковка приложения, проверки
 ```
 
 Ядро (всё, кроме `app` и `capture`) не зависит ни от системы, ни от

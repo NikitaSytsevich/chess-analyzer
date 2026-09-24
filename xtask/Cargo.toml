@@ -1,6 +1,6 @@
 [package]
 name = "xtask"
-description = "Сборка приложения: загрузка Stockfish, упаковка для macOS и Windows, запуск, проверки"
+description = "Сборка приложения: загрузка Stockfish, иконка, упаковка для macOS и Windows, запуск, проверки"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -9,6 +9,8 @@ publish.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+# Та же версия, что у распознавания: иконка рисуется из SVG.
+resvg = { version = "0.48.1", default-features = false }
 sha2 = "0.10"
 
 [lints]

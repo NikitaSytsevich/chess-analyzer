@@ -8792,6 +8792,7 @@ name = "xtask"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "resvg 0.48.1",
  "sha2 0.10.9",
 ]
 

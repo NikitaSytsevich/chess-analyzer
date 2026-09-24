@@ -18,6 +18,8 @@ use std::process::Command;
 use anyhow::{Context, Result, bail, ensure};
 use sha2::{Digest as _, Sha256};
 
+mod icons;
+
 const APP_NAME: &str = "Шахматный анализатор";
 const BUNDLE_ID: &str = "by.sytsevich.chess-analyzer";
 const EXECUTABLE: &str = "chess-analyzer";
@@ -82,6 +84,7 @@ fn main() -> Result<()> {
         Some("bundle") => bundle(release).map(|app| println!("{}", app.display())),
         Some("run") => run(release),
         Some("ci") => ci(),
+        Some("icons") => icons::icons(&root().join("assets/icon")),
         _ => {
             eprintln!(
                 "использование: cargo xtask <команда> [--release]\n\n\
@@ -89,7 +92,8 @@ fn main() -> Result<()> {
                  bundle           собрать приложение в target/: «{APP_NAME}.app» на macOS,\n\
                  \x20                папка «{APP_NAME}» на Windows\n\
                  run              собрать приложение и запустить с журналом в терминале\n\
-                 ci               rustfmt, clippy без предупреждений, тесты"
+                 ci               rustfmt, clippy без предупреждений, тесты\n\
+                 icons            перерисовать иконку приложения из assets/icon/icon.svg"
             );
             bail!("не указана команда");
         }
@@ -219,6 +223,7 @@ fn bundle_macos(target: &Path, stockfish: &Path) -> Result<PathBuf> {
     let engine = contents.join("Resources/engines/stockfish");
     fs::copy(stockfish, &engine)?;
     copy_stockfish_license(stockfish, &contents.join("Resources/engines"))?;
+    fs::copy(root().join("assets/icon/AppIcon.icns"), contents.join("Resources/AppIcon.icns"))?;
     fs::write(contents.join("Info.plist"), info_plist())?;
 
     // Подпись ad-hoc, изнутри наружу: сначала вложенный движок, потом само
@@ -261,6 +266,7 @@ fn info_plist() -> String {
     <key>CFBundleDisplayName</key><string>{APP_NAME}</string>
     <key>CFBundleName</key><string>{APP_NAME}</string>
     <key>CFBundleExecutable</key><string>{EXECUTABLE}</string>
+    <key>CFBundleIconFile</key><string>AppIcon</string>
     <key>CFBundleIdentifier</key><string>{BUNDLE_ID}</string>
     <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
     <key>CFBundlePackageType</key><string>APPL</string>
