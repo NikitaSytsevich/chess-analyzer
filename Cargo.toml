@@ -1,0 +1,50 @@
+[workspace]
+resolver = "3"
+members = ["crates/*", "xtask"]
+default-members = ["crates/app"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.98"
+license = "GPL-3.0-or-later"
+authors = ["Nikita Sytsevich"]
+publish = false
+
+[workspace.dependencies]
+# Собственные крейты. Зависимости идут строго в одну сторону:
+# app → session → {tracker → {vision, chess}, engine → chess, capture → vision}.
+analyzer-capture = { path = "crates/capture" }
+
+# GPUI ещё не 1.0 и ломает API между версиями — версия зафиксирована точно.
+# gpui-kit включает runtime_shaders: шейдеры Metal собираются при запуске,
+# поэтому для сборки хватает Command Line Tools, Xcode не нужен.
+gpui-kit = "=0.6.6"
+screencapturekit = { version = "10.0.3", features = ["macos_15_0"] }
+
+anyhow = "1.0.104"
+thiserror = "2.0.21"
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+flume = "0.12"
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
+[workspace.lints.clippy]
+dbg_macro = "warn"
+todo = "warn"
+
+[profile.dev]
+# Полная отладочная информация для GPUI весит гигабайты: оставляем номера строк.
+debug = "line-tables-only"
+
+# Зависимости в отладочной сборке тоже оптимизируем: GPUI и разбор кадров
+# без оптимизаций заметно тормозят, а пересобираются они редко.
+[profile.dev.package."*"]
+opt-level = 1
+
+[profile.release]
+lto = "thin"
+codegen-units = 4
+strip = "debuginfo"

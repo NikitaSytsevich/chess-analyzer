@@ -1,0 +1,12 @@
+[package]
+name = "analyzer-vision"
+description = "Распознавание 2D-доски на кадре трансляции"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,18 @@
+[package]
+name = "analyzer-capture"
+description = "Захват окна трансляции через ScreenCaptureKit"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[dependencies]
+analyzer-vision = { path = "../vision" }
+screencapturekit.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[lints]
+workspace = true

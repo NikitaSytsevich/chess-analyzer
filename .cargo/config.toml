@@ -1,0 +1,11 @@
+[alias]
+xtask = "run --quiet --package xtask --"
+
+[env]
+# Swift-мосты ScreenCaptureKit собраны под macOS 13+, а Rust по умолчанию
+# линкует под 11.0. Минимум приложения — macOS 15 (Info.plist тот же).
+MACOSX_DEPLOYMENT_TARGET = "15.0"
+
+[build]
+# У Mac 8 ГБ памяти: восемь параллельных компиляций GPUI уводят систему в своп.
+jobs = 6

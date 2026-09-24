@@ -1,0 +1,27 @@
+[package]
+name = "analyzer-app"
+description = "Шахматный анализатор — суфлёр комментатора шахматных трансляций"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "chess-analyzer"
+path = "src/main.rs"
+
+[dependencies]
+analyzer-capture.workspace = true
+analyzer-vision = { path = "../vision" }
+gpui-kit.workspace = true
+# Тот же image, что внутри GPUI: превью кадра передаётся ему как image::Frame.
+image = { version = "0.25", default-features = false }
+flume.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[lints]
+workspace = true
