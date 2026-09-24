@@ -160,6 +160,9 @@ name = "analyzer-app"
 version = "0.1.0"
 dependencies = [
  "analyzer-capture",
+ "analyzer-chess",
+ "analyzer-engine",
+ "analyzer-session",
  "analyzer-vision",
  "anyhow",
  "flume",

@@ -2,7 +2,7 @@ use std::time::Instant;
 
 use analyzer_chess::{Board, Fen, Square};
 use analyzer_vision::synth::{Style, render};
-use analyzer_vision::{LEARNED_SET, Orientation, Recognizer, bundled_sets};
+use analyzer_vision::{LEARNED_SET, Orientation, Recognizer, bundled_sets, find_board};
 
 const POSITIONS: [&str; 5] = [
     "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR",
@@ -118,4 +118,16 @@ fn a_frame_fits_the_time_budget() {
     let steady = started.elapsed() / 20;
     println!("первый кадр (поиск доски и набора): {first:?}, дальше: {steady:?} на кадр");
     assert!(steady.as_millis() < 15, "{steady:?}");
+}
+
+#[test]
+fn a_small_board_is_found_in_a_whole_browser_window() {
+    // Доска 384 px посреди «окна» 1184 px — как 2D-доска на странице трансляции.
+    let style = Style { square: 48, margin: 400, ..Style::lichess("cburnett") };
+    let frame = render(&board(POSITIONS[2]), &style, &[Square::E2, Square::E4]);
+    let started = Instant::now();
+    let (grid, _) = find_board(&frame).expect("board");
+    println!("поиск доски в окне {}×{}: {:?}", frame.width(), frame.height(), started.elapsed());
+    assert!((grid.x0 - 400.0).abs() < 1.0 && (grid.y0 - 400.0).abs() < 1.0, "{grid:?}");
+    assert!((grid.square - 48.0).abs() < 0.3, "{grid:?}");
 }

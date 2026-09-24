@@ -7,6 +7,7 @@
 //! каждого потока принадлежит ему одному, общаются они только сообщениями.
 
 mod core;
+pub mod demo;
 mod hints;
 mod vision_loop;
 

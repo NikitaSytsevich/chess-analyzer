@@ -2,7 +2,7 @@ use analyzer_chess::{Bitboard, Board, Color, File, Piece, Rank, Role, Square};
 
 use crate::Frame;
 use crate::color::{Rgb, median_rgb};
-use crate::grid::{Grid, locate_grid};
+use crate::grid::{Grid, grid_candidates};
 use crate::learn::Learner;
 use crate::patch::Patch;
 use crate::pieces::{PieceSet, bundled_sets, piece_at_index};
@@ -153,29 +153,9 @@ impl Recognizer {
 
     /// Ищет доску на кадре и запоминает её положение и цвета.
     pub fn locate(&mut self, frame: &Frame) -> Result<Grid, VisionError> {
-        let (grid, quality) = locate_grid(frame).ok_or(VisionError::NoBoard)?;
-        if quality < 2.0 {
-            return Err(VisionError::NoBoard);
-        }
-        let scan = scan(frame, &grid);
-        let light = median_rgb(
-            &(0..64).filter(|&i| Scan::is_light(i)).map(|i| scan.backgrounds[i]).collect::<Vec<_>>(),
-        );
-        let dark = median_rgb(
-            &(0..64).filter(|&i| !Scan::is_light(i)).map(|i| scan.backgrounds[i]).collect::<Vec<_>>(),
-        );
-        // Настоящая доска: поля двух заметно разных цветов, и почти каждая
-        // клетка своего цвета (кроме пары подсвеченных).
-        let matching = (0..64)
-            .filter(|&i| {
-                scan.backgrounds[i].distance(if Scan::is_light(i) { light } else { dark }) < HIGHLIGHT
-            })
-            .count();
-        if light.distance(dark) < 18.0 || matching < 48 {
-            return Err(VisionError::NoBoard);
-        }
+        let (grid, palette) = best_board(frame, 0.45).ok_or(VisionError::NoBoard)?;
         self.grid = Some(grid);
-        self.palette = Some(Palette { light, dark });
+        self.palette = Some(palette);
         Ok(grid)
     }
 
@@ -287,6 +267,40 @@ impl Recognizer {
         }
         if count == 0.0 { 0.0 } else { sum / count }
     }
+}
+
+/// Цвета полей, если на месте `grid` действительно доска: поля двух
+/// заметно разных цветов, и почти каждая клетка своего цвета (кроме пары
+/// подсвеченных).
+fn palette_for(frame: &Frame, grid: &Grid) -> Option<Palette> {
+    let scan = scan(frame, grid);
+    let parity = |light: bool| {
+        median_rgb(
+            &(0..64).filter(|&i| Scan::is_light(i) == light).map(|i| scan.backgrounds[i]).collect::<Vec<_>>(),
+        )
+    };
+    let (light, dark) = (parity(true), parity(false));
+    let matching = (0..64)
+        .filter(|&i| scan.backgrounds[i].distance(if Scan::is_light(i) { light } else { dark }) < HIGHLIGHT)
+        .count();
+    // Подсвечены бывают последний ход, шах и предварительный ход — до пяти
+    // клеток. Сетка, сдвинутая на клетку, захватывает целый ряд страницы —
+    // восемь чужих клеток — и здесь отсеивается.
+    (light.distance(dark) >= 18.0 && matching >= 57).then_some(Palette { light, dark })
+}
+
+/// Первый кандидат сетки, который действительно доска.
+fn best_board(frame: &Frame, min_fraction: f32) -> Option<(Grid, Palette)> {
+    grid_candidates(frame, min_fraction)
+        .into_iter()
+        .filter(|(_, quality)| *quality >= 2.0)
+        .find_map(|(grid, _)| palette_for(frame, &grid).map(|palette| (grid, palette)))
+}
+
+/// Доска где-то в окне трансляции — для первичной настройки, когда захвачено
+/// всё окно браузера, а доска занимает его малую часть.
+pub fn find_board(frame: &Frame) -> Option<(Grid, Palette)> {
+    best_board(frame, 0.12)
 }
 
 fn scan(frame: &Frame, grid: &Grid) -> Scan {

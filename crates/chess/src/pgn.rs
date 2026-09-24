@@ -14,7 +14,8 @@ pub struct PgnMeta {
     pub date: String,
     pub white: String,
     pub black: String,
-    /// `1-0`, `0-1`, `1/2-1/2` или `*`, если партия идёт.
+    /// `1-0`, `0-1`, `1/2-1/2` или `*`, если партия идёт. Если партия
+    /// закончилась на доске (мат, пат), результат берётся из позиции.
     pub result: String,
 }
 
@@ -43,6 +44,7 @@ pub struct PlyAnnotation {
 ///
 /// `annotation(i)` — сведения о полуходе с индексом `i` (с нуля).
 pub fn to_pgn(game: &Game, meta: &PgnMeta, annotation: impl Fn(usize) -> PlyAnnotation) -> String {
+    let result = game.ending().map_or(meta.result.as_str(), |ending| ending.result());
     let mut out = String::new();
     let mut header = |key: &str, value: &str| {
         let value = value.replace('\\', "\\\\").replace('"', "\\\"");
@@ -54,7 +56,7 @@ pub fn to_pgn(game: &Game, meta: &PgnMeta, annotation: impl Fn(usize) -> PlyAnno
     header("Round", "?");
     header("White", &meta.white);
     header("Black", &meta.black);
-    header("Result", &meta.result);
+    header("Result", result);
     if !game.starts_from_standard() {
         header("SetUp", "1");
         header("FEN", &game.initial_fen());
@@ -77,7 +79,7 @@ pub fn to_pgn(game: &Game, meta: &PgnMeta, annotation: impl Fn(usize) -> PlyAnno
             tokens.push(format!("{{[%eval {}]}}", pgn_eval(score)));
         }
     }
-    tokens.push(meta.result.clone());
+    tokens.push(result.to_owned());
 
     // PGN требует строки не длиннее 80 символов.
     let mut line = String::new();
@@ -149,7 +151,9 @@ mod tests {
         });
         assert!(pgn.contains("[SetUp \"1\"]"));
         assert!(pgn.contains("[FEN \"6k1/p4ppp/8/8/8/8/5PPP/3R2K1 b - - 0 30\"]"));
-        assert!(pgn.contains("30... a6 31. Rd8# {[%eval #0]}"), "{pgn}");
+        assert!(pgn.contains("30... a6 31. Rd8# {[%eval #0]} 1-0"), "{pgn}");
+        // Мат на доске — результат партии, даже если заголовки его не знают.
+        assert!(pgn.contains("[Result \"1-0\"]"), "{pgn}");
     }
 
     #[test]

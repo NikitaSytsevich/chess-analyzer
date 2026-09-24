@@ -127,6 +127,23 @@ pub fn render_svg(svg: &str, size: u32) -> Option<tiny_skia::Pixmap> {
     Some(pixmap)
 }
 
+/// Та же картинка в BGRA с обычной, не умноженной на цвет прозрачностью —
+/// в таком виде картинки принимает интерфейс (GPUI).
+pub fn render_svg_bgra(svg: &str, size: u32) -> Option<Vec<u8>> {
+    let mut data = render_svg(svg, size)?.take();
+    for pixel in data.as_chunks_mut::<4>().0 {
+        let alpha = pixel[3];
+        if alpha > 0 && alpha < 255 {
+            let a = f32::from(alpha) / 255.0;
+            for channel in &mut pixel[..3] {
+                *channel = (f32::from(*channel) / a).round().min(255.0) as u8;
+            }
+        }
+        pixel.swap(0, 2);
+    }
+    Some(data)
+}
+
 /// Шаблон из SVG: рисуем крупно и усредняем до N×N — так же, как клетка
 /// кадра усредняется до N×N, и шаблон с клеткой сравниваются на равных.
 fn template_from_svg(svg: &str) -> Template {

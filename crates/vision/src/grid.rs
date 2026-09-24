@@ -31,45 +31,75 @@ impl Grid {
 /// Шум сжатия видео: градиенты слабее этого — не границы клеток.
 const GRADIENT_NOISE: f32 = 12.0;
 
-/// Находит доску. Второе значение — насколько отчётливы границы клеток
-/// (отношение пиков к среднему уровню профиля); меньше ~2 — доски, скорее
-/// всего, нет.
+/// Находит доску, занимающую большую часть кадра: область захвата выбирали
+/// по ней, поле вокруг — 6%. Второе значение — насколько отчётливы границы
+/// клеток (отношение пиков к среднему уровню профиля).
 pub fn locate_grid(frame: &Frame) -> Option<(Grid, f32)> {
+    locate_grid_with(frame, 0.45)
+}
+
+/// То же, но доска может быть мельче: сторона не меньше `min_fraction`
+/// меньшей стороны кадра. Для поиска доски во всём окне браузера.
+pub fn locate_grid_with(frame: &Frame, min_fraction: f32) -> Option<(Grid, f32)> {
+    grid_candidates(frame, min_fraction).into_iter().next()
+}
+
+/// Несколько лучших положений сетки, от самого вероятного.
+///
+/// Одного лучшего мало: край доски на тёмной странице даёт пик сильнее любой
+/// внутренней линии, и сетка, сдвинутая на клетку, «съедает» его как свою
+/// седьмую линию. Такие кандидаты отсеиваются проверкой чередования клеток
+/// (`palette_for` в распознавателе), поэтому здесь важно их не потерять.
+pub fn grid_candidates(frame: &Frame, min_fraction: f32) -> Vec<(Grid, f32)> {
     let width = frame.width() as usize;
     let height = frame.height() as usize;
     if width < 64 || height < 64 {
-        return None;
+        return Vec::new();
     }
     let (px, py) = gradient_profiles(frame);
     let min_side = width.min(height) as f32;
-    // Доска занимает большую часть кадра: область выбирали по ней, поле — 6%.
-    let s_min = (min_side * 0.45 / 8.0).max(6.0);
+    let s_min = (min_side * min_fraction / 8.0).max(6.0);
     let s_max = min_side / 8.0;
+    // На большом окне перебор идёт шагом в полпикселя: точность всё равно
+    // добирает уточнение по пикам ниже.
+    let step = if s_max - s_min > 60.0 { 0.5 } else { 0.25 };
 
-    let mut best: Option<(f32, f32, f32, f32)> = None; // (score, s, x0, y0)
+    let mut raw: Vec<(f32, f32, f32, f32)> = Vec::new(); // (score, s, x0, y0)
     let mut s = s_min;
     while s <= s_max {
-        if let (Some((x0, sx)), Some((y0, sy))) = (best_offset(&px, s), best_offset(&py, s)) {
-            let score = sx + sy;
-            if best.is_none_or(|(b, ..)| score > b) {
-                best = Some((score, s, x0, y0));
+        for (x0, sx) in best_offsets(&px, s, 3) {
+            for (y0, sy) in best_offsets(&py, s, 3) {
+                raw.push((sx + sy, s, x0, y0));
             }
         }
-        s += 0.25;
+        s += step;
     }
-    let (_, s, x0, y0) = best?;
+    raw.sort_by(|a, b| b.0.total_cmp(&a.0));
 
-    // Уточнение до долей пикселя: настоящие пики возле предсказанных мест и
-    // прямая через них методом наименьших квадратов.
-    let (x0, sx) = refine(&px, x0, s);
-    let (y0, sy) = refine(&py, y0, s);
-    if (sx - sy).abs() > 0.04 * sx.max(sy) {
-        return None;
+    let mut candidates: Vec<(Grid, f32)> = Vec::new();
+    for (_, s, x0, y0) in raw {
+        if candidates.len() == 16 {
+            break;
+        }
+        // Уточнение до долей пикселя: настоящие пики возле предсказанных мест
+        // и прямая через них методом наименьших квадратов.
+        let (x0, sx) = refine(&px, x0, s);
+        let (y0, sy) = refine(&py, y0, s);
+        if (sx - sy).abs() > 0.04 * sx.max(sy) {
+            continue;
+        }
+        let grid = Grid { x0, y0, square: (sx + sy) / 2.0 };
+        let duplicate = candidates.iter().any(|(other, _)| {
+            (other.x0 - grid.x0).abs() < grid.square * 0.3
+                && (other.y0 - grid.y0).abs() < grid.square * 0.3
+                && (other.square - grid.square).abs() < grid.square * 0.03
+        });
+        if !duplicate {
+            let quality = (contrast(&px, x0, sx) + contrast(&py, y0, sy)) / 2.0;
+            candidates.push((grid, quality));
+        }
     }
-    let square = (sx + sy) / 2.0;
-    let grid = Grid { x0, y0, square };
-    let quality = (contrast(&px, x0, sx) + contrast(&py, y0, sy)) / 2.0;
-    Some((grid, quality))
+    candidates
 }
 
 /// Профили градиента: сумма по столбцам и по строкам. Элемент `i` —
@@ -100,24 +130,41 @@ fn peak(profile: &[f32], edge: f32) -> f32 {
         .fold(0.0, |acc: f32, v| acc.max(*v))
 }
 
-/// Лучший сдвиг сетки с шагом `s`: семь внутренних границ весят полностью,
+/// Лучшие сдвиги сетки с шагом `s`: семь внутренних границ весят полностью,
 /// два края доски — меньше, у них с одной стороны фон страницы, а не клетка.
-fn best_offset(profile: &[f32], s: f32) -> Option<(f32, f32)> {
+/// Сдвиги ближе полуклетки друг к другу — один и тот же кандидат.
+fn best_offsets(profile: &[f32], s: f32, count: usize) -> Vec<(f32, f32)> {
     let len = profile.len() as f32 + 1.0;
     let last = len - 8.0 * s;
     if last < 0.0 {
-        return None;
+        return Vec::new();
     }
-    let mut best = None;
+    let mut scored = Vec::new();
     let mut x0 = 0.0;
     while x0 <= last {
-        let inner: f32 = (1..8).map(|k| peak(profile, x0 + k as f32 * s)).sum();
-        let outer = peak(profile, x0) + peak(profile, x0 + 8.0 * s);
-        let score = inner + 0.35 * outer;
-        if best.is_none_or(|(_, b)| score > b) {
-            best = Some((x0, score));
+        // Каждая внутренняя линия весит не больше полутора медиан семи: иначе
+        // одна яркая граница (край доски на тёмной странице) перевешивает
+        // шесть настоящих и тянет сетку на клетку в сторону.
+        let mut inner: [f32; 7] = std::array::from_fn(|k| peak(profile, x0 + (k + 1) as f32 * s));
+        let mut sorted = inner;
+        sorted.sort_by(f32::total_cmp);
+        let cap = sorted[3] * 1.5;
+        for value in &mut inner {
+            *value = value.min(cap);
         }
+        let outer = peak(profile, x0) + peak(profile, x0 + 8.0 * s);
+        scored.push((x0, inner.iter().sum::<f32>() + 0.35 * outer));
         x0 += 1.0;
+    }
+    scored.sort_by(|a, b| b.1.total_cmp(&a.1));
+    let mut best: Vec<(f32, f32)> = Vec::with_capacity(count);
+    for (x0, score) in scored {
+        if best.len() == count {
+            break;
+        }
+        if best.iter().all(|(other, _)| (other - x0).abs() >= s * 0.5) {
+            best.push((x0, score));
+        }
     }
     best
 }

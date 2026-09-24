@@ -14,7 +14,10 @@ path = "src/main.rs"
 
 [dependencies]
 analyzer-capture.workspace = true
-analyzer-vision = { path = "../vision" }
+analyzer-chess.workspace = true
+analyzer-engine.workspace = true
+analyzer-session.workspace = true
+analyzer-vision.workspace = true
 gpui-kit.workspace = true
 # Тот же image, что внутри GPUI: превью кадра передаётся ему как image::Frame.
 image = { version = "0.25", default-features = false }

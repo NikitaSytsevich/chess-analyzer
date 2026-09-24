@@ -80,6 +80,9 @@ pub struct CaptureSession {
     source: Source,
     config: Mutex<CaptureConfig>,
     counters: Arc<Counters>,
+    /// Куда кладутся кадры. Меняется на ходу: пока комментатор выбирает
+    /// доску, кадры окна идут экрану настройки, потом — распознаванию.
+    target: Arc<Mutex<Arc<FrameSlot>>>,
 }
 
 impl CaptureSession {
@@ -97,6 +100,8 @@ impl CaptureSession {
             SCStream::new_with_delegate(&source.filter, &stream_config(&source, &config), callbacks);
 
         let handler_counters = Arc::clone(&counters);
+        let target = Arc::new(Mutex::new(slot));
+        let handler_target = Arc::clone(&target);
         stream.add_output_handler(
             move |sample: CMSampleBuffer, of_type: SCStreamOutputType| {
                 if !matches!(of_type, SCStreamOutputType::Screen) {
@@ -112,6 +117,8 @@ impl CaptureSession {
                 }
                 if let Some(frame) = frame_from_sample(&sample) {
                     handler_counters.frames.fetch_add(1, Ordering::Relaxed);
+                    let slot =
+                        Arc::clone(&handler_target.lock().unwrap_or_else(|poisoned| poisoned.into_inner()));
                     slot.put(frame);
                 }
             },
@@ -119,7 +126,7 @@ impl CaptureSession {
         );
         stream.start_capture().map_err(|error| CaptureError::Stream(error.to_string()))?;
         tracing::info!(title = %source.title, ?config, "capture started");
-        Ok(Self { stream, source, config: Mutex::new(config), counters })
+        Ok(Self { stream, source, config: Mutex::new(config), counters, target })
     }
 
     pub fn source(&self) -> &Source {
@@ -129,11 +136,27 @@ impl CaptureSession {
     /// Переключает захват на область окна (или на окно целиком) без
     /// перезапуска потока.
     pub fn set_region(&self, region: Option<RegionF>) -> Result<(), CaptureError> {
-        let mut config = self.config.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        config.region = region;
+        let config = CaptureConfig { region, ..self.config() };
+        self.reconfigure(config)
+    }
+
+    /// Новые частота, область и размер кадра — без перезапуска потока.
+    pub fn reconfigure(&self, config: CaptureConfig) -> Result<(), CaptureError> {
+        let mut current = self.config.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         self.stream
             .update_configuration(&stream_config(&self.source, &config))
-            .map_err(|error| CaptureError::Stream(error.to_string()))
+            .map_err(|error| CaptureError::Stream(error.to_string()))?;
+        *current = config;
+        Ok(())
+    }
+
+    pub fn config(&self) -> CaptureConfig {
+        *self.config.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// Следующие кадры пойдут в `slot`.
+    pub fn set_target(&self, slot: Arc<FrameSlot>) {
+        *self.target.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = slot;
     }
 
     pub fn stats(&self) -> CaptureStats {

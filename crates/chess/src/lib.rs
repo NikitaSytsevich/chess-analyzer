@@ -12,7 +12,7 @@ mod pgn;
 
 pub use assess::{Assessment, MoveClass, Thresholds, assess, is_only_move};
 pub use eval::{Score, Wdl, expected_score};
-pub use game::{Game, IllegalMove, Ply};
+pub use game::{Ending, Game, IllegalMove, Ply};
 pub use notation::{Notation, format_san, line_text, move_prefix, san_text};
 pub use pgn::{PgnMeta, PlyAnnotation, to_pgn};
 pub use shakmaty::fen::Fen;

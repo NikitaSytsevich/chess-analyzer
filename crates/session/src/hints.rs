@@ -93,6 +93,14 @@ pub(crate) fn only_move_hint(
     }
 }
 
+/// Ходящая сторона ставит мат: `score` — со стороны белых, как у движка.
+pub(crate) fn mover_mates(position: &Chess, score: Score) -> bool {
+    match score {
+        Score::Mate(n) if n != 0 => (n > 0) == (position.turn() == Color::White),
+        _ => false,
+    }
+}
+
 /// «Белые ставят мат в 3 хода: 25.Фh7+ Крf8 26.Фh8#».
 pub(crate) fn mate_hint(
     ply: usize,
@@ -102,8 +110,7 @@ pub(crate) fn mate_hint(
     notation: Notation,
 ) -> Option<Hint> {
     let Score::Mate(n) = score else { return None };
-    let winner = if n > 0 { Color::White } else { Color::Black };
-    if winner != position.turn() || n == 0 {
+    if !mover_mates(position, score) {
         return None;
     }
     let moves = n.unsigned_abs();
@@ -118,7 +125,7 @@ pub(crate) fn mate_hint(
         kind: HintKind::Mate,
         text: format!(
             "{} ставят мат в {moves} {word}: {}",
-            side_nominative(winner),
+            side_nominative(position.turn()),
             line_text(position, &line[..shown], notation)
         ),
     })
@@ -164,6 +171,16 @@ mod tests {
         assert_eq!(hint.text, "Белые ставят мат в 1 ход: 30.Лd8#");
         // Мат не той стороне, что ходит, — не подсказка «мат в n».
         assert!(mate_hint(58, &pos, Score::Mate(-2), &line, Notation::Russian).is_none());
+    }
+
+    #[test]
+    fn mate_belongs_to_the_side_whose_sign_it_carries() {
+        let white = position("6k1/5ppp/8/8/8/8/5PPP/3R2K1 w - - 0 30");
+        let black = position("3r2k1/5ppp/8/8/8/8/5PPP/6K1 b - - 0 30");
+        assert!(mover_mates(&white, Score::Mate(1)));
+        assert!(!mover_mates(&white, Score::Mate(-1)));
+        assert!(mover_mates(&black, Score::Mate(-1)));
+        assert!(!mover_mates(&black, Score::Cp(900)));
     }
 
     #[test]

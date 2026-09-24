@@ -21,7 +21,9 @@ pub mod synth;
 
 pub use color::Rgb;
 pub use frame::{Frame, PixelRect};
-pub use grid::{Grid, locate_grid};
-pub use pieces::{BUNDLED, PieceSet, bundled_sets, bundled_svg, render_svg};
-pub use recognizer::{Cell, LEARNED_SET, Observation, Orientation, Palette, Recognizer, VisionError};
+pub use grid::{Grid, grid_candidates, locate_grid, locate_grid_with};
+pub use pieces::{BUNDLED, PieceSet, bundled_sets, bundled_svg, render_svg, render_svg_bgra};
+pub use recognizer::{
+    Cell, LEARNED_SET, Observation, Orientation, Palette, Recognizer, VisionError, find_board,
+};
 pub use slot::FrameSlot;

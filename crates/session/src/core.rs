@@ -15,7 +15,7 @@ use analyzer_engine::{AnalysisRequest, AnalysisUpdate, Engine, Line, PositionId}
 use analyzer_tracker::GameEvent;
 
 use crate::Event;
-use crate::hints::{HintKind, error_hint, mate_hint, only_move_hint};
+use crate::hints::{HintKind, error_hint, mate_hint, mover_mates, only_move_hint};
 
 /// Глубина, с которой оценке уже можно доверять для классификации хода…
 const ASSESS_DEPTH: u32 = 10;
@@ -235,7 +235,9 @@ impl Core {
         {
             out.push(Event::Hint(hint));
         }
+        // Единственный ход, который матует, уже назван подсказкой о мате.
         if update.depth >= HINT_DEPTH
+            && !mover_mates(&position, best.score)
             && let (Some(second), Some(&mv)) = (update.lines.get(1), best.moves.first())
             && is_only_move(position.turn(), best.score, second.score, &self.thresholds)
             && self.hinted.insert((hash, HintKindKey::OnlyMove))

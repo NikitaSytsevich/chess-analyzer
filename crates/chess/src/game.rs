@@ -1,7 +1,7 @@
 use shakmaty::fen::Fen;
 use shakmaty::san::SanPlus;
 use shakmaty::uci::UciMove;
-use shakmaty::{Board, CastlingMode, Chess, EnPassantMode, Move, Position};
+use shakmaty::{Board, CastlingMode, Chess, Color, EnPassantMode, Move, Position};
 
 use crate::position_hash;
 
@@ -15,6 +15,45 @@ pub struct Ply {
     pub san: SanPlus,
     pub after: Chess,
     pub hash: u64,
+}
+
+/// Чем закончилась партия на доске. Сдачу, время и ничью по соглашению
+/// с трансляции не увидеть — только то, что следует из позиции.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Ending {
+    Checkmate { winner: Color },
+    Stalemate,
+    InsufficientMaterial,
+}
+
+impl Ending {
+    pub fn of(position: &Chess) -> Option<Self> {
+        if position.is_checkmate() {
+            Some(Self::Checkmate { winner: !position.turn() })
+        } else if position.is_stalemate() {
+            Some(Self::Stalemate)
+        } else if position.is_insufficient_material() {
+            Some(Self::InsufficientMaterial)
+        } else {
+            None
+        }
+    }
+
+    /// Результат в записи PGN.
+    pub fn result(self) -> &'static str {
+        match self {
+            Self::Checkmate { winner: Color::White } => "1-0",
+            Self::Checkmate { winner: Color::Black } => "0-1",
+            Self::Stalemate | Self::InsufficientMaterial => "1/2-1/2",
+        }
+    }
+
+    pub fn winner(self) -> Option<Color> {
+        match self {
+            Self::Checkmate { winner } => Some(winner),
+            Self::Stalemate | Self::InsufficientMaterial => None,
+        }
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -75,6 +114,10 @@ impl Game {
 
     pub fn current(&self) -> &Chess {
         self.position(self.len())
+    }
+
+    pub fn ending(&self) -> Option<Ending> {
+        Ending::of(self.current())
     }
 
     pub fn play(&mut self, mv: Move) -> Result<&Ply, IllegalMove> {
@@ -156,6 +199,22 @@ mod tests {
         assert_eq!(game.find_board(&start, 2), None);
         game.truncate(2);
         assert_eq!(game.current().board(), &after_e5);
+    }
+
+    #[test]
+    fn a_game_knows_how_it_ended_on_the_board() {
+        let mut game = Game::default();
+        for mv in ["f2f3", "e7e5", "g2g4", "d8h4"] {
+            play(&mut game, mv);
+        }
+        assert_eq!(game.ending(), Some(Ending::Checkmate { winner: Color::Black }));
+        assert_eq!(game.ending().unwrap().result(), "0-1");
+
+        let fen =
+            |text: &str| text.parse::<Fen>().unwrap().into_position::<Chess>(CastlingMode::Standard).unwrap();
+        assert_eq!(Ending::of(&fen("7k/5Q2/6K1/8/8/8/8/8 b - - 0 60")), Some(Ending::Stalemate));
+        assert_eq!(Ending::of(&fen("8/8/4k3/8/8/2K5/5B2/8 w - - 0 70")), Some(Ending::InsufficientMaterial));
+        assert_eq!(Game::default().ending(), None);
     }
 
     #[test]
