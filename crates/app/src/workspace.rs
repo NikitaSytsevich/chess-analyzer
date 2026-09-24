@@ -20,12 +20,13 @@ use analyzer_session::{Command, Event, Session, SessionConfig};
 use analyzer_vision::{Frame, FrameSlot, Orientation, find_board};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::{Disableable as _, Sizable as _, TitleBar};
+use gpui_kit::component::{Disableable as _, Icon, Selectable as _, Sizable as _, TitleBar};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
 use crate::model::Model;
 use crate::pieces::PieceImages;
+use crate::pin::{self, Unpinned};
 use crate::theme::{self, hex};
 use crate::views::analysis::{ending_text, eval_bar, lines_card, score_card};
 use crate::views::board::{BoardProps, board};
@@ -35,7 +36,18 @@ use crate::views::{chip, measure};
 
 actions!(
     analyzer,
-    [TogglePause, Flip, Relocate, PickSource, CopyFen, CopyPgn, PasteFen, ConfirmBoard, TogglePanel]
+    [
+        TogglePause,
+        Flip,
+        Relocate,
+        PickSource,
+        CopyFen,
+        CopyPgn,
+        PasteFen,
+        ConfirmBoard,
+        TogglePanel,
+        TogglePin
+    ]
 );
 
 /// Клавиши окна. Глобальные (при фокусе на браузере) — отдельно, этап 3.
@@ -50,6 +62,7 @@ pub fn key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("cmd-v", PasteFen, Some("Workspace")),
         KeyBinding::new("enter", ConfirmBoard, Some("Workspace")),
         KeyBinding::new("i", TogglePanel, Some("Workspace")),
+        KeyBinding::new("t", TogglePin, Some("Workspace")),
     ]
 }
 
@@ -128,6 +141,8 @@ pub struct Workspace {
     panel_hidden: bool,
     /// Ширина окна до того, как его поджали под доску: панель вернётся в ней.
     wide_width: Option<Pixels>,
+    /// Окно закреплено поверх всех окон; внутри — каким оно было до этого.
+    pinned: Option<Unpinned>,
     /// Шкала оценки, сглаженная анимацией.
     bar: f32,
     capture_fps: f32,
@@ -234,6 +249,7 @@ impl Workspace {
             moves_scroll: ScrollHandle::new(),
             panel_hidden: false,
             wide_width: None,
+            pinned: None,
             bar: 0.5,
             capture_fps: 0.0,
             frames_seen: 0,
@@ -405,7 +421,7 @@ impl Workspace {
     fn setup_point(&self, position: Point<Pixels>) -> Option<(f32, f32)> {
         let Phase::Placing(placing) = &self.phase else { return None };
         let frame = placing.frame.as_ref()?;
-        let rect = image_rect(self.setup_space.get()?, frame);
+        let rect = image_rect(self.setup_space.get()?, (frame.width(), frame.height()));
         let scale = frame.width() as f32 / f32::from(rect.size.width);
         let x = (f32::from(position.x - rect.origin.x) * scale).clamp(0.0, frame.width() as f32);
         let y = (f32::from(position.y - rect.origin.y) * scale).clamp(0.0, frame.height() as f32);
@@ -462,6 +478,22 @@ impl Workspace {
             }
         }
         cx.notify();
+    }
+
+    /// Закрепляет окно поверх всех окон, в том числе поверх браузера на весь
+    /// экран, — или возвращает обычное поведение.
+    fn toggle_pin(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let result = match self.pinned.take() {
+            Some(before) => pin::unpin(window, before).map(|()| "Окно больше не поверх других"),
+            None => pin::pin(window).map(|before| {
+                self.pinned = Some(before);
+                "Окно поверх всех окон и на всех рабочих столах"
+            }),
+        };
+        match result {
+            Ok(text) => self.flash(text, cx),
+            Err(error) => self.warn(format!("Не удалось изменить уровень окна: {error:#}"), cx),
+        }
     }
 
     fn copy_fen(&mut self, cx: &mut Context<Self>) {
@@ -565,12 +597,28 @@ impl Workspace {
                         .tooltip("Перевернуть доску (F)")
                         .on_click(cx.listener(|this, _, _, _| this.send(Command::Flip))),
                 )
-                .child(
+                .children((!compact).then(|| {
                     Button::new("source")
                         .ghost()
                         .icon(IconName::ScreenShare)
                         .tooltip("Выбрать другое окно (⌘O)")
-                        .on_click(cx.listener(|this, _, _, cx| this.pick(cx))),
+                        .on_click(cx.listener(|this, _, _, cx| this.pick(cx)))
+                }))
+                .child(
+                    Button::new("pin")
+                        .ghost()
+                        // Закреплённое окно видно сразу: булавка горит акцентом.
+                        .icon(
+                            Icon::new(IconName::Pin)
+                                .when(self.pinned.is_some(), |icon| icon.text_color(hex(theme::ACCENT))),
+                        )
+                        .selected(self.pinned.is_some())
+                        .tooltip(if self.pinned.is_some() {
+                            "Не держать поверх окон (T)"
+                        } else {
+                            "Поверх всех окон (T)"
+                        })
+                        .on_click(cx.listener(|this, _, window, cx| this.toggle_pin(window, cx))),
                 )
                 .children(live.then(|| {
                     Button::new("panel")
@@ -702,20 +750,6 @@ impl Workspace {
 
     fn placing(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let Phase::Placing(placing) = &self.phase else { return div().into_any_element() };
-        let space = self.setup_space.get();
-        let overlay = placing.board.zip(placing.frame.as_ref()).zip(space).map(|((board, frame), space)| {
-            let rect = image_rect(space, frame);
-            let scale = f32::from(rect.size.width) / frame.width() as f32;
-            div()
-                .absolute()
-                .left(rect.origin.x - space.origin.x + px(board.x * scale))
-                .top(rect.origin.y - space.origin.y + px(board.y * scale))
-                .size(px(board.side * scale))
-                .border_2()
-                .border_color(hex(theme::ACCENT))
-                .rounded_sm()
-                .bg(hex(theme::ACCENT).opacity(0.08))
-        });
         let caption =
             match (placing.board.is_some(), placing.detected, placing.searching, placing.frame.is_some()) {
                 (_, _, _, false) => "Жду первый кадр окна…",
@@ -781,14 +815,11 @@ impl Workspace {
                     .border_1()
                     .border_color(hex(theme::BORDER))
                     .cursor_crosshair()
-                    .child(measure(Rc::clone(&self.setup_space)))
-                    .children(
-                        placing
-                            .image
-                            .clone()
-                            .map(|image| img(image).size_full().object_fit(ObjectFit::Contain)),
-                    )
-                    .children(overlay)
+                    .child(preview(
+                        Rc::clone(&self.setup_space),
+                        placing.image.clone().zip(placing.frame.as_ref().map(|f| (f.width(), f.height()))),
+                        placing.board,
+                    ))
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(|this, event: &MouseDownEvent, _, cx| {
@@ -953,16 +984,55 @@ impl Workspace {
     }
 }
 
-/// Где на экране окажется кадр, вписанный в `space` с сохранением пропорций.
-fn image_rect(space: Bounds<Pixels>, frame: &Frame) -> Bounds<Pixels> {
-    let scale = (f32::from(space.size.width) / frame.width() as f32)
-        .min(f32::from(space.size.height) / frame.height() as f32);
-    let size = size(px(frame.width() as f32 * scale), px(frame.height() as f32 * scale));
+/// Где на экране окажется кадр `width`×`height`, вписанный в `space` целиком
+/// с сохранением пропорций.
+fn image_rect(space: Bounds<Pixels>, (width, height): (u32, u32)) -> Bounds<Pixels> {
+    let scale =
+        (f32::from(space.size.width) / width as f32).min(f32::from(space.size.height) / height as f32);
+    let size = size(px(width as f32 * scale), px(height as f32 * scale));
     let origin = point(
         space.origin.x + (space.size.width - size.width) / 2.,
         space.origin.y + (space.size.height - size.height) / 2.,
     );
     Bounds::new(origin, size)
+}
+
+/// Кадр окна трансляции с рамкой доски поверх. Кадр, рамка и место под них
+/// (по нему мышь переводится в пиксели кадра) берутся из одной раскладки:
+/// рамка не может разойтись с доской ни при каком размере окна, и после
+/// изменения размера ничего не ждёт следующего кадра захвата.
+fn preview(
+    space: Rc<Cell<Option<Bounds<Pixels>>>>,
+    image: Option<(Arc<RenderImage>, (u32, u32))>,
+    board: Option<BoardRect>,
+) -> impl IntoElement {
+    canvas(
+        move |bounds, _, _| space.set(Some(bounds)),
+        move |bounds, (), window, _| {
+            let Some((image, frame_size)) = image else { return };
+            let rect = image_rect(bounds, frame_size);
+            if let Err(error) = window.paint_image(rect, rect, Corners::default(), image, 0, false) {
+                tracing::warn!("кадр окна не нарисован: {error:#}");
+            }
+            let Some(board) = board else { return };
+            let scale = f32::from(rect.size.width) / frame_size.0 as f32;
+            let outline = Bounds::new(
+                point(rect.origin.x + px(board.x * scale), rect.origin.y + px(board.y * scale)),
+                size(px(board.side * scale), px(board.side * scale)),
+            );
+            window.paint_quad(quad(
+                outline,
+                px(4.),
+                hex(theme::ACCENT).opacity(0.08),
+                px(2.),
+                hex(theme::ACCENT),
+                BorderStyle::Solid,
+            ));
+        },
+    )
+    .absolute()
+    .inset_0()
+    .size_full()
 }
 
 /// Кадр BGRA — в картинку GPUI: он и так хранит пиксели в BGRA.
@@ -998,6 +1068,7 @@ impl Render for Workspace {
             .on_action(cx.listener(|this, _: &CopyPgn, _, cx| this.copy_pgn(cx)))
             .on_action(cx.listener(|this, _: &PasteFen, _, cx| this.paste_fen(cx)))
             .on_action(cx.listener(|this, _: &ConfirmBoard, _, cx| this.confirm_board(cx)))
+            .on_action(cx.listener(|this, _: &TogglePin, window, cx| this.toggle_pin(window, cx)))
             .on_action(cx.listener(|this, _: &TogglePanel, window, cx| {
                 if matches!(this.phase, Phase::Live) {
                     this.toggle_panel(window, cx);

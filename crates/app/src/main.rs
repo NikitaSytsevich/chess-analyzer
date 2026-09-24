@@ -5,6 +5,7 @@
 
 mod model;
 mod pieces;
+mod pin;
 mod theme;
 mod views;
 mod workspace;

@@ -26,6 +26,11 @@ analyzer-vision = { path = "crates/vision" }
 # поэтому для сборки хватает Command Line Tools, Xcode не нужен.
 gpui-kit = "=0.6.6"
 screencapturekit = { version = "10.0.3", features = ["macos_15_0"] }
+# Уровень окна («поверх всех окон») GPUI меняет только при создании окна —
+# после него только напрямую у NSWindow. Версии — те же, что внутри GPUI.
+objc2 = "0.6.4"
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["NSResponder", "NSView", "NSWindow"] }
+raw-window-handle = { version = "0.6.2", features = ["std"] }
 shakmaty = "0.30.1"
 
 anyhow = "1.0.104"
