@@ -90,13 +90,18 @@ pub fn score_card(
         .into_any_element()
 }
 
-fn result_card(ending: Ending) -> AnyElement {
-    let (result, how) = match ending {
+/// Результат для экрана («1–0», с настоящим тире) и чем он получен.
+pub fn ending_text(ending: Ending) -> (&'static str, &'static str) {
+    match ending {
         Ending::Checkmate { winner: Color::White } => ("1–0", "Мат · победа белых"),
         Ending::Checkmate { winner: Color::Black } => ("0–1", "Мат · победа чёрных"),
         Ending::Stalemate => ("½–½", "Пат · ничья"),
         Ending::InsufficientMaterial => ("½–½", "Мало материала для мата · ничья"),
-    };
+    }
+}
+
+fn result_card(ending: Ending) -> AnyElement {
+    let (result, how) = ending_text(ending);
     card()
         .gap_3()
         .child(

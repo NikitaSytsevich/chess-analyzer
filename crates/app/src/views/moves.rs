@@ -66,7 +66,7 @@ pub fn moves_card(
         }
     }
     let empty = rows.is_empty();
-    card().flex_1().min_h_0().child(section_title("Партия")).child(
+    card().flex_1().min_h(px(120.)).child(section_title("Партия")).child(
         // Полоса прокрутки рисуется поверх своего родителя: отдельная
         // обёртка, чтобы полоса шла вдоль ходов, а не всей карточки.
         div()
@@ -145,12 +145,17 @@ pub fn hints_card(hints: &VecDeque<Hint>) -> impl IntoElement {
             .child(div().flex_1().min_w_0().text_sm().text_color(hex(theme::TEXT)).child(hint.text.clone()))
     });
     let empty = hints.is_empty();
-    card().child(section_title("Подсказки")).children(items).when(empty, |this| {
-        this.child(
-            div()
-                .text_sm()
-                .text_color(hex(theme::FAINT))
-                .child("Ошибки, единственные ходы и маты — по ходу партии"),
-        )
-    })
+    // Когда места мало, подсказки уступают его списку ходов: старые уходят
+    // за нижний край карточки, свежая сверху видна всегда.
+    card().min_h(px(92.)).overflow_hidden().child(section_title("Подсказки")).children(items).when(
+        empty,
+        |this| {
+            this.child(
+                div()
+                    .text_sm()
+                    .text_color(hex(theme::FAINT))
+                    .child("Ошибки, единственные ходы и маты — по ходу партии"),
+            )
+        },
+    )
 }

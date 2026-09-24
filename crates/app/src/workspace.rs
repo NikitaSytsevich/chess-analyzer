@@ -11,8 +11,8 @@ use std::time::{Duration, Instant};
 
 use analyzer_capture::{CaptureConfig, CaptureError, CaptureSession, RegionF, Source, pick_source};
 use analyzer_chess::{
-    Bitboard, CastlingMode, Chess, Color, EnPassantMode, Fen, PgnMeta, PlyAnnotation, Position, Square,
-    to_pgn,
+    Bitboard, CastlingMode, Chess, Color, EnPassantMode, Fen, PgnMeta, PlyAnnotation, Position, Score,
+    Square, to_pgn,
 };
 use analyzer_engine::{EngineOptions, locate_stockfish};
 use analyzer_session::demo::Demo;
@@ -21,18 +21,22 @@ use analyzer_vision::{Frame, FrameSlot, Orientation, find_board};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::{Disableable as _, Sizable as _, TitleBar};
+use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
 use crate::model::Model;
 use crate::pieces::PieceImages;
 use crate::theme::{self, hex};
-use crate::views::analysis::{eval_bar, lines_card, score_card};
+use crate::views::analysis::{ending_text, eval_bar, lines_card, score_card};
 use crate::views::board::{BoardProps, board};
 use crate::views::graph::eval_graph;
 use crate::views::moves::{hints_card, moves_card};
 use crate::views::{chip, measure};
 
-actions!(analyzer, [TogglePause, Flip, Relocate, PickSource, CopyFen, CopyPgn, PasteFen, ConfirmBoard]);
+actions!(
+    analyzer,
+    [TogglePause, Flip, Relocate, PickSource, CopyFen, CopyPgn, PasteFen, ConfirmBoard, TogglePanel]
+);
 
 /// Клавиши окна. Глобальные (при фокусе на браузере) — отдельно, этап 3.
 pub fn key_bindings() -> Vec<KeyBinding> {
@@ -45,8 +49,27 @@ pub fn key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("cmd-shift-c", CopyPgn, Some("Workspace")),
         KeyBinding::new("cmd-v", PasteFen, Some("Workspace")),
         KeyBinding::new("enter", ConfirmBoard, Some("Workspace")),
+        KeyBinding::new("i", TogglePanel, Some("Workspace")),
     ]
 }
+
+// Раскладка экрана анализа, в пикселях окна.
+/// Поля вокруг содержимого.
+const PAD: f32 = 16.0;
+/// Шкала оценки и зазор между ней и доской.
+const BAR: f32 = 14.0;
+const GAP: f32 = 12.0;
+/// График оценки под доской.
+const GRAPH: f32 = 96.0;
+/// Правая панель: оценка, линии, подсказки, ходы.
+const PANEL: f32 = 390.0;
+const MIN_SIDE: f32 = 240.0;
+/// Высота заголовка окна (`TitleBar` из gpui-component).
+const TITLE: f32 = 34.0;
+/// Уже или ниже этого панель не помещается рядом с доской и прячется сама.
+/// Высота — заголовок, оценка, три линии, одна подсказка и несколько ходов.
+const FULL_MIN_WIDTH: f32 = PAD + MIN_SIDE + BAR + GAP + PAD + PANEL + PAD;
+const FULL_MIN_HEIGHT: f32 = 560.0;
 
 /// Сообщения из чужих потоков: колбэки ScreenCaptureKit приходят из его
 /// очередей, а менять состояние окна можно только в главном потоке.
@@ -101,6 +124,10 @@ pub struct Workspace {
     setup_space: Rc<Cell<Option<Bounds<Pixels>>>>,
     board_measured: Rc<Cell<f32>>,
     moves_scroll: ScrollHandle,
+    /// Комментатор спрятал панель: остаются доска и шкала, окно — рядом с трансляцией.
+    panel_hidden: bool,
+    /// Ширина окна до того, как его поджали под доску: панель вернётся в ней.
+    wide_width: Option<Pixels>,
     /// Шкала оценки, сглаженная анимацией.
     bar: f32,
     capture_fps: f32,
@@ -205,6 +232,8 @@ impl Workspace {
             setup_space: Rc::default(),
             board_measured: Rc::new(Cell::new(0.0)),
             moves_scroll: ScrollHandle::new(),
+            panel_hidden: false,
+            wide_width: None,
             bar: 0.5,
             capture_fps: 0.0,
             frames_seen: 0,
@@ -389,6 +418,52 @@ impl Workspace {
         cx.notify();
     }
 
+    /// Анализ без панели: её спрятал комментатор или окно для неё мало.
+    fn compact(&self, window: &Window) -> bool {
+        let viewport = window.viewport_size();
+        self.panel_hidden
+            || f32::from(viewport.width) < FULL_MIN_WIDTH
+            || f32::from(viewport.height) < FULL_MIN_HEIGHT
+    }
+
+    /// Высота места под доску и график на экране анализа.
+    fn live_height(&self, window: &Window) -> f32 {
+        self.board_space.get().map_or_else(
+            || f32::from(window.viewport_size().height) - TITLE - 4.0 - PAD,
+            |space| f32::from(space.size.height),
+        )
+    }
+
+    /// Прячет панель и поджимает окно под доску со шкалой, чтобы рядом
+    /// поместилась трансляция, — или возвращает панель и прежнюю ширину окна,
+    /// при необходимости подрастив его до размера, где панель помещается.
+    fn toggle_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let viewport = window.viewport_size();
+        let resizable = !window.is_fullscreen();
+        if self.compact(window) {
+            self.panel_hidden = false;
+            if resizable {
+                let height = viewport.height.max(px(FULL_MIN_HEIGHT));
+                let side = (f32::from(height) - TITLE - 4.0 - PAD - GRAPH - GAP).max(MIN_SIDE);
+                let needed = px(PAD + BAR + GAP + side + PAD + PANEL + PAD);
+                let width =
+                    self.wide_width.take().map_or(needed, |wide| wide.max(needed)).max(viewport.width);
+                if width > viewport.width || height > viewport.height {
+                    window.resize(size(width, height));
+                }
+            }
+        } else {
+            // Высота не меняется: доска остаётся того же размера.
+            self.panel_hidden = true;
+            if resizable {
+                self.wide_width = Some(viewport.width);
+                let side = self.live_height(window).max(MIN_SIDE);
+                window.resize(size(px(PAD + BAR + GAP + side + PAD), viewport.height));
+            }
+        }
+        cx.notify();
+    }
+
     fn copy_fen(&mut self, cx: &mut Context<Self>) {
         if let Some(game) = &self.model.game {
             let fen = Fen::from_position(game.current(), EnPassantMode::Legal).to_string();
@@ -454,8 +529,64 @@ impl Workspace {
         orientation != Some(Orientation::BlackBottom)
     }
 
-    fn title_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let recognition = self.model.recognition.as_ref();
+    /// Заголовок окна. В полном виде — индикаторы захвата, распознавания и
+    /// движка; в узком их не уместить, и там, где нет панели, стоит оценка:
+    /// число рядом со шкалой комментатору всё равно нужно.
+    fn title_bar(&self, compact: bool, cx: &mut Context<Self>) -> impl IntoElement {
+        let live = matches!(self.phase, Phase::Live);
+        let left = if compact && live {
+            self.title_score().into_any_element()
+        } else {
+            div().text_sm().font_weight(FontWeight::SEMIBOLD).child("Шахматный анализатор").into_any_element()
+        };
+        let chips = (!compact).then(|| self.status_chips());
+        TitleBar::new().child(left).child(
+            div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .pr_2()
+                .children(chips.into_iter().flatten())
+                .child(
+                    Button::new("pause")
+                        .ghost()
+                        .icon(if self.paused { IconName::Play } else { IconName::Pause })
+                        .tooltip(if self.paused {
+                            "Продолжить анализ (пробел)"
+                        } else {
+                            "Пауза (пробел)"
+                        })
+                        .on_click(cx.listener(|this, _, _, cx| this.toggle_pause(cx))),
+                )
+                .child(
+                    Button::new("flip")
+                        .ghost()
+                        .icon(IconName::FlipVertical2)
+                        .tooltip("Перевернуть доску (F)")
+                        .on_click(cx.listener(|this, _, _, _| this.send(Command::Flip))),
+                )
+                .child(
+                    Button::new("source")
+                        .ghost()
+                        .icon(IconName::ScreenShare)
+                        .tooltip("Выбрать другое окно (⌘O)")
+                        .on_click(cx.listener(|this, _, _, cx| this.pick(cx))),
+                )
+                .children(live.then(|| {
+                    Button::new("panel")
+                        .ghost()
+                        .icon(if compact { IconName::PanelRightOpen } else { IconName::PanelRightClose })
+                        .tooltip(if compact {
+                            "Показать панель анализа (I)"
+                        } else {
+                            "Только доска (I)"
+                        })
+                        .on_click(cx.listener(|this, _, window, cx| this.toggle_panel(window, cx)))
+                })),
+        )
+    }
+
+    fn status_chips(&self) -> [AnyElement; 3] {
         let capture = match (&self.capture, &self.source_title) {
             (None, Some(title)) if self.demo.is_some() => chip(theme::INFO, title.clone()),
             (Some(_), Some(title)) => chip(
@@ -464,7 +595,7 @@ impl Workspace {
             ),
             _ => chip(theme::FAINT, "Трансляция не подключена".into()),
         };
-        let board = match recognition {
+        let board = match self.model.recognition.as_ref() {
             Some(r) if r.board_found => chip(
                 if r.mean_confidence > 0.6 { theme::GOOD } else { theme::INACCURACY },
                 format!("Доска {:.0}%", r.mean_confidence * 100.0).into(),
@@ -479,56 +610,43 @@ impl Workspace {
             }
             (None, None) => chip(theme::FAINT, "Движок запускается".into()),
         };
-        TitleBar::new()
+        [capture.into_any_element(), board.into_any_element(), engine.into_any_element()]
+    }
+
+    /// Оценка для заголовка узкого окна: число и под ним глубина.
+    fn title_score(&self) -> impl IntoElement {
+        let best = self.model.analysis.as_ref().and_then(|a| a.best().map(|line| (a.depth, line.score)));
+        let (value, color, detail): (SharedString, u32, SharedString) = match (self.model.ending(), best) {
+            (Some(ending), _) => (ending_text(ending).0.into(), theme::ACCENT, "партия окончена".into()),
+            (None, _) if self.paused => ("—".into(), theme::MUTED, "пауза".into()),
+            (None, Some((depth, score))) => (
+                score.to_string().into(),
+                if matches!(score, Score::Mate(_)) { theme::ACCENT } else { theme::TEXT },
+                format!("глубина {depth}").into(),
+            ),
+            (None, None) => ("—".into(), theme::MUTED, "движок думает".into()),
+        };
+        div()
+            .flex()
+            .items_baseline()
+            .gap_2()
             .child(
                 div()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .child(div().text_sm().font_weight(FontWeight::SEMIBOLD).child("Шахматный анализатор")),
+                    .font_family(theme::MONO)
+                    .text_base()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(hex(color))
+                    .child(value),
             )
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .pr_2()
-                    .child(capture)
-                    .child(board)
-                    .child(engine)
-                    .child(
-                        Button::new("pause")
-                            .ghost()
-                            .icon(if self.paused { IconName::Play } else { IconName::Pause })
-                            .tooltip(if self.paused {
-                                "Продолжить анализ (пробел)"
-                            } else {
-                                "Пауза (пробел)"
-                            })
-                            .on_click(cx.listener(|this, _, _, cx| this.toggle_pause(cx))),
-                    )
-                    .child(
-                        Button::new("flip")
-                            .ghost()
-                            .icon(IconName::FlipVertical2)
-                            .tooltip("Перевернуть доску (F)")
-                            .on_click(cx.listener(|this, _, _, _| this.send(Command::Flip))),
-                    )
-                    .child(
-                        Button::new("source")
-                            .ghost()
-                            .icon(IconName::ScreenShare)
-                            .tooltip("Выбрать другое окно (⌘O)")
-                            .on_click(cx.listener(|this, _, _, cx| this.pick(cx))),
-                    ),
-            )
+            .child(div().text_xs().text_color(hex(theme::MUTED)).child(detail))
     }
 
     fn welcome(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let picking = matches!(self.phase, Phase::Picking);
-        div().flex_1().flex().items_center().justify_center().child(
+        div().flex_1().flex().items_center().justify_center().px_4().child(
             div()
-                .w(px(460.))
+                .w_full()
+                .max_w(px(460.))
                 .flex()
                 .flex_col()
                 .items_center()
@@ -620,8 +738,11 @@ impl Workspace {
                     .flex()
                     .items_center()
                     .justify_between()
+                    .gap_3()
                     .child(
                         div()
+                            .flex_1()
+                            .min_w_0()
                             .flex()
                             .flex_col()
                             .gap_0p5()
@@ -631,6 +752,7 @@ impl Workspace {
                     .child(
                         div()
                             .flex()
+                            .flex_shrink_0()
                             .gap_2()
                             .child(
                                 Button::new("repick")
@@ -705,7 +827,7 @@ impl Workspace {
             .into_any_element()
     }
 
-    fn live(&mut self, window: &mut Window) -> impl IntoElement {
+    fn live(&mut self, compact: bool, window: &mut Window) -> impl IntoElement {
         // Шкала догоняет оценку плавно: быстрые колебания на малых глубинах
         // не дёргают её, а крупная смена оценки видна как движение.
         let target = self.model.bar_target();
@@ -750,14 +872,11 @@ impl Workspace {
             .unwrap_or(Bitboard::EMPTY);
 
         // Сторона доски — наибольшая, при которой шкала, доска и график под
-        // ними помещаются в свободное место слева от панели.
-        const BAR: f32 = 14.0;
-        const GAP: f32 = 12.0;
-        const GRAPH: f32 = 96.0;
+        // ними помещаются в свободное место слева от панели. Без панели нет
+        // и графика: остаются доска и шкала.
+        let below = if compact { 0.0 } else { GRAPH + GAP };
         let side = self.board_space.get().map_or(480.0, |space| {
-            (f32::from(space.size.width) - BAR - GAP)
-                .min(f32::from(space.size.height) - GRAPH - GAP)
-                .max(240.0)
+            (f32::from(space.size.width) - BAR - GAP).min(f32::from(space.size.height) - below).max(MIN_SIDE)
         });
         let empty_board = analyzer_chess::Board::default();
         let board_view = board(BoardProps {
@@ -785,6 +904,7 @@ impl Workspace {
                     .h_full()
                     .flex()
                     .justify_center()
+                    .when(compact, |this| this.items_center())
                     .child(measure(Rc::clone(&self.board_space)))
                     .child(
                         div()
@@ -800,31 +920,36 @@ impl Workspace {
                                     .child(eval_bar(self.bar, white_bottom))
                                     .child(div().size(px(side)).child(board_view)),
                             )
-                            .child(eval_graph(&self.model.evals, &self.model.assessments)),
+                            .when(!compact, |this| {
+                                this.child(eval_graph(&self.model.evals, &self.model.assessments))
+                            }),
                     ),
             )
-            .child(
-                div()
-                    .w(px(390.))
-                    .flex_shrink_0()
-                    .flex()
-                    .flex_col()
-                    .gap_3()
-                    .child(score_card(
-                        self.model.analysis.as_ref(),
-                        self.model.finished,
-                        self.paused,
-                        self.model.ending(),
-                    ))
-                    .child(lines_card(self.model.analysis.as_ref(), position.as_ref(), self.model.notation))
-                    .child(hints_card(&self.model.hints))
-                    .child(moves_card(
-                        self.model.game.as_deref(),
-                        &self.model.assessments,
-                        self.model.notation,
-                        &self.moves_scroll,
-                    )),
-            )
+            .when(!compact, |this| this.child(self.panel(position.as_ref())))
+    }
+
+    fn panel(&self, position: Option<&Chess>) -> impl IntoElement {
+        div()
+            .w(px(PANEL))
+            .flex_shrink_0()
+            .min_h_0()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .child(score_card(
+                self.model.analysis.as_ref(),
+                self.model.finished,
+                self.paused,
+                self.model.ending(),
+            ))
+            .child(lines_card(self.model.analysis.as_ref(), position, self.model.notation))
+            .child(hints_card(&self.model.hints))
+            .child(moves_card(
+                self.model.game.as_deref(),
+                &self.model.assessments,
+                self.model.notation,
+                &self.moves_scroll,
+            ))
     }
 }
 
@@ -856,10 +981,11 @@ impl Focusable for Workspace {
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.ensure_pieces(window, cx);
+        let compact = self.compact(window);
         let body = match self.phase {
             Phase::Welcome | Phase::Picking => self.welcome(cx).into_any_element(),
             Phase::Placing(_) => self.placing(cx).into_any_element(),
-            Phase::Live => self.live(window).into_any_element(),
+            Phase::Live => self.live(compact, window).into_any_element(),
         };
         div()
             .track_focus(&self.focus)
@@ -872,12 +998,17 @@ impl Render for Workspace {
             .on_action(cx.listener(|this, _: &CopyPgn, _, cx| this.copy_pgn(cx)))
             .on_action(cx.listener(|this, _: &PasteFen, _, cx| this.paste_fen(cx)))
             .on_action(cx.listener(|this, _: &ConfirmBoard, _, cx| this.confirm_board(cx)))
+            .on_action(cx.listener(|this, _: &TogglePanel, window, cx| {
+                if matches!(this.phase, Phase::Live) {
+                    this.toggle_panel(window, cx);
+                }
+            }))
             .size_full()
             .flex()
             .flex_col()
             .bg(hex(theme::BACKGROUND))
             .text_color(hex(theme::TEXT))
-            .child(self.title_bar(cx))
+            .child(self.title_bar(compact, cx))
             .children(self.notice.clone().map(|notice| {
                 div()
                     .mx_4()

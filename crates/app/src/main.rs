@@ -29,7 +29,8 @@ fn main() {
         cx.bind_keys(workspace::key_bindings());
         let options = WindowOptions {
             window_bounds: Some(WindowBounds::centered(size(px(1280.), px(820.)), cx)),
-            window_min_size: Some(size(px(960.), px(640.))),
+            // Узкое окно — доска со шкалой рядом с трансляцией, панель прячется сама.
+            window_min_size: Some(size(px(340.), px(400.))),
             ..TitleBar::window_options()
         };
         cx.open_window(options, |window, cx| {
