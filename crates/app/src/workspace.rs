@@ -87,8 +87,9 @@ const TITLE: f32 = 34.0;
 const FULL_MIN_WIDTH: f32 = PAD + MIN_SIDE + BAR + GAP + PAD + PANEL_MIN + PAD;
 const FULL_MIN_HEIGHT: f32 = 560.0;
 
-/// Сообщения из чужих потоков: колбэки ScreenCaptureKit приходят из его
-/// очередей, а менять состояние окна можно только в главном потоке.
+/// Сообщения из чужих потоков: колбэки захвата приходят из потоков системы
+/// (очередей ScreenCaptureKit, пула потоков Windows), а менять состояние окна
+/// можно только в главном потоке.
 enum Message {
     Picked(Result<Option<Source>, CaptureError>),
     CaptureStopped(Option<String>),
@@ -322,7 +323,7 @@ impl Workspace {
     /// «Оперная партия» синтетическими кадрами через весь конвейер — чтобы
     /// посмотреть анализатор без трансляции.
     fn start_demo(&mut self, cx: &mut Context<Self>) {
-        self.capture = None;
+        self.stop_capture(cx);
         self.send(Command::Relocate);
         self.demo = Some(Demo::start(Arc::clone(&self.session_slot), Duration::from_secs(3)));
         self.source_title = Some("Демо: «Оперная партия», 1858".into());
@@ -337,32 +338,55 @@ impl Workspace {
         self.notice = None;
         cx.notify();
         let tx = self.tx.clone();
-        pick_source(move |result| {
-            let _ = tx.send(Message::Picked(result));
-        });
+        // Выбор окна, начало и остановка захвата — не изнутри обработчика
+        // события окна, а отдельной задачей. На Windows эти вызовы системы,
+        // пока ждут ответа, передают окну накопившиеся сообщения (активация,
+        // фокус), а GPUI, занятый обработчиком, такие сообщения теряет.
+        cx.spawn(async move |_, _| {
+            pick_source(move |result| {
+                let _ = tx.send(Message::Picked(result));
+            });
+        })
+        .detach();
+    }
+
+    /// Останавливает захват отдельной задачей (почему — см. `pick`).
+    fn stop_capture(&mut self, cx: &mut Context<Self>) {
+        if let Some(capture) = self.capture.take() {
+            cx.spawn(async move |_, _| drop(capture)).detach();
+        }
     }
 
     fn handle(&mut self, message: Message, _window: &mut Window, cx: &mut Context<Self>) {
         match message {
             Message::Picked(Ok(Some(source))) => {
-                let tx = self.tx.clone();
-                self.capture = None;
+                self.stop_capture(cx);
                 self.source_title = Some(source.title.clone().into());
-                // Сначала всё окно — чтобы найти на нём доску.
-                let config =
-                    CaptureConfig { fps: 4, region: None, max_side_region: 640, max_side_full: 1600 };
-                match CaptureSession::start(source, config, Arc::clone(&self.setup_slot), move |reason| {
-                    let _ = tx.send(Message::CaptureStopped(reason));
-                }) {
-                    Ok(capture) => {
-                        self.capture = Some(capture);
-                        self.phase = Phase::Placing(Placing::default());
-                    }
-                    Err(error) => {
-                        self.phase = Phase::Welcome;
-                        self.warn(format!("Не удалось начать захват: {error}"), cx);
-                    }
-                }
+                let tx = self.tx.clone();
+                let slot = Arc::clone(&self.setup_slot);
+                // Начало захвата — отдельной задачей (почему — см. `pick`).
+                cx.spawn(async move |this, cx| {
+                    // Сначала всё окно — чтобы найти на нём доску.
+                    let config =
+                        CaptureConfig { fps: 4, region: None, max_side_region: 640, max_side_full: 1600 };
+                    let started = CaptureSession::start(source, config, slot, move |reason| {
+                        let _ = tx.send(Message::CaptureStopped(reason));
+                    });
+                    this.update(cx, |this, cx| {
+                        match started {
+                            Ok(capture) => {
+                                this.capture = Some(capture);
+                                this.phase = Phase::Placing(Placing::default());
+                            }
+                            Err(error) => {
+                                this.phase = Phase::Welcome;
+                                this.warn(format!("Не удалось начать захват: {error}"), cx);
+                            }
+                        }
+                        cx.notify();
+                    })
+                })
+                .detach();
             }
             Message::Picked(Ok(None)) => {
                 self.phase = if self.capture.is_some() { Phase::Live } else { Phase::Welcome };
@@ -372,7 +396,7 @@ impl Workspace {
                 self.warn(error.to_string(), cx);
             }
             Message::CaptureStopped(reason) => {
-                self.capture = None;
+                self.stop_capture(cx);
                 self.phase = Phase::Welcome;
                 self.warn(
                     reason.map_or_else(
@@ -655,6 +679,10 @@ impl Workspace {
         }
         let pinned = self.pinned.is_some();
         div()
+            // Заголовок целиком — область перетаскивания окна. На Windows
+            // клик в ней забирает система (двигать окно), и до кнопок он не
+            // доходит; панель перекрывает эту область под собой.
+            .occlude()
             .flex_shrink_0()
             .flex()
             .items_center()
