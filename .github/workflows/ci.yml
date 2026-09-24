@@ -1,0 +1,49 @@
+# Проверки и сборка под Windows. macOS проверяется на машине разработки
+# (`cargo xtask ci`): минуты macOS в Actions в десять раз дороже.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  windows:
+    name: Windows — проверки и сборка
+    runs-on: windows-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Rust из rust-toolchain.toml
+        run: rustup toolchain install
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Форматирование
+        run: cargo fmt --all --check
+
+      - name: Clippy без предупреждений
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Тесты
+        run: cargo test --workspace
+
+      - name: Сборка приложения
+        run: cargo xtask bundle --release
+
+      - name: Папка приложения
+        uses: actions/upload-artifact@v4
+        with:
+          name: chess-analyzer-windows-x64
+          path: target/release/Шахматный анализатор/
+          if-no-files-found: error

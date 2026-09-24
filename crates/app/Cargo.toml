@@ -21,13 +21,18 @@ analyzer-vision.workspace = true
 gpui-kit.workspace = true
 # Тот же image, что внутри GPUI: превью кадра передаётся ему как image::Frame.
 image = { version = "0.25", default-features = false }
-objc2.workspace = true
-objc2-app-kit.workspace = true
 raw-window-handle.workspace = true
 flume.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2.workspace = true
+objc2-app-kit.workspace = true
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows.workspace = true
 
 [lints]
 workspace = true

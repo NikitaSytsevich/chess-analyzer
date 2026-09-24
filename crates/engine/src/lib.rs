@@ -186,17 +186,23 @@ impl Drop for Engine {
     }
 }
 
-/// Где лежит Stockfish: переменная `STOCKFISH_PATH`, затем ресурсы `.app`
-/// (`Contents/Resources/engines/stockfish`), затем `vendor/` рабочей копии —
-/// для запуска из `cargo run` и тестов.
+/// Где лежит Stockfish: переменная `STOCKFISH_PATH`, затем рядом с
+/// программой (в `.app` — `Contents/Resources/engines/stockfish`, в папке
+/// Windows — `engines\stockfish.exe`), затем `vendor/` рабочей копии — для
+/// запуска из `cargo run` и тестов.
 pub fn locate_stockfish() -> Option<PathBuf> {
     if let Some(path) = std::env::var_os("STOCKFISH_PATH").map(PathBuf::from) {
         return Some(path);
     }
-    let bundled = std::env::current_exe()
-        .ok()
-        .and_then(|exe| exe.parent().map(|macos| macos.join("../Resources/engines/stockfish")));
-    let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../vendor/stockfish/stockfish");
+    let file = format!("stockfish{}", std::env::consts::EXE_SUFFIX);
+    let bundled = std::env::current_exe().ok().and_then(|exe| {
+        let dir = exe.parent()?;
+        Some(
+            if cfg!(target_os = "macos") { dir.join("../Resources/engines") } else { dir.join("engines") }
+                .join(&file),
+        )
+    });
+    let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../vendor/stockfish").join(&file);
     [bundled, Some(workspace)].into_iter().flatten().find(|path| path.is_file())
 }
 

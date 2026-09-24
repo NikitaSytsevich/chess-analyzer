@@ -1,0 +1,5 @@
+# Переводы строк — LF на всех системах: иначе Git на Windows превратит их в
+# CRLF, и `cargo fmt --check` и сравнение текстов в тестах разойдутся с macOS.
+* text=auto eol=lf
+*.png binary
+*.icns binary

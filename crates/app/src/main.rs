@@ -3,9 +3,12 @@
 //! Окно на GPUI поверх ядра (`analyzer-session`): захват окна трансляции,
 //! распознавание доски, партия, анализ Stockfish и подсказки.
 
+// Выпускная сборка на Windows — оконная программа: без окна консоли рядом.
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+
 mod model;
 mod pieces;
-mod pin;
+mod platform;
 mod theme;
 mod views;
 mod workspace;

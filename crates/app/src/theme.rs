@@ -49,7 +49,7 @@ pub const UNSURE: u32 = 0xE5534BCC;
 pub const ARROWS: [u32; 3] = [0x3FA65CE0, 0x4C8DD8A8, 0x4C8DD866];
 
 /// Шрифт цифр: моноширинный, чтобы оценка не прыгала при смене знаков.
-pub const MONO: &str = "Menlo";
+pub const MONO: &str = crate::platform::MONO_FONT;
 
 /// Цвет класса хода.
 pub fn class_color(class: analyzer_chess::MoveClass) -> Hsla {

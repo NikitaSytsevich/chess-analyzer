@@ -1,8 +1,14 @@
 //! `cargo xtask <команда>` — всё, что нужно сделать с проектом, кроме самого
-//! кода: скачать Stockfish, собрать `.app`, запустить, прогнать проверки.
+//! кода: скачать Stockfish, собрать приложение, запустить, прогнать проверки.
 //!
-//! Внешние инструменты — только из поставки macOS и Command Line Tools
-//! (`curl`, `shasum`, `tar`, `lipo`, `codesign`): Xcode не нужен.
+//! Приложение собирается под систему, на которой идёт сборка:
+//!
+//! - macOS — `.app` с ad-hoc подписью; инструменты — из Command Line Tools
+//!   (`curl`, `tar`, `lipo`, `codesign`), Xcode не нужен;
+//! - Windows — папка с программой и движком; `curl` и `tar` есть в самой
+//!   Windows 10 и 11.
+//!
+//! Контрольные суммы считаются здесь же, на Rust, — одинаково везде.
 
 use std::env;
 use std::fs;
@@ -10,17 +16,63 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{Context, Result, bail, ensure};
+use sha2::{Digest as _, Sha256};
 
 const APP_NAME: &str = "Шахматный анализатор";
 const BUNDLE_ID: &str = "by.sytsevich.chess-analyzer";
 const EXECUTABLE: &str = "chess-analyzer";
 const MIN_MACOS: &str = "15.0";
 
-/// Stockfish 19, официальный релиз. Сумма взята из поля `digest` ассета на
-/// GitHub: если архив подменят или он побьётся при загрузке, сборка остановится.
-const STOCKFISH_URL: &str = "https://github.com/official-stockfish/Stockfish/releases/download/sf_19/stockfish-macos-universal.tar.gz";
-const STOCKFISH_SHA256: &str = "a1f0e3bcc5a6927a11fe6fc8e54a779754645f3c2bae2cf13420fd1957adaa77";
+/// Stockfish 19, официальный релиз.
 const STOCKFISH_VERSION: &str = "sf_19";
+
+/// Сборка Stockfish под систему, на которой собирается приложение. Суммы
+/// взяты из поля `digest` ассетов релиза на GitHub: если архив подменят или
+/// он побьётся при загрузке, сборка остановится. Все сборки «universal» —
+/// сами выбирают код под возможности процессора.
+struct StockfishAsset {
+    archive: &'static str,
+    sha256: &'static str,
+    megabytes: u32,
+}
+
+impl StockfishAsset {
+    fn url(&self) -> String {
+        format!(
+            "https://github.com/official-stockfish/Stockfish/releases/download/{STOCKFISH_VERSION}/{}",
+            self.archive
+        )
+    }
+}
+
+fn stockfish_asset() -> Result<StockfishAsset> {
+    Ok(if cfg!(target_os = "macos") {
+        StockfishAsset {
+            archive: "stockfish-macos-universal.tar.gz",
+            sha256: "a1f0e3bcc5a6927a11fe6fc8e54a779754645f3c2bae2cf13420fd1957adaa77",
+            megabytes: 82,
+        }
+    } else if cfg!(all(target_os = "windows", target_arch = "x86_64")) {
+        StockfishAsset {
+            archive: "stockfish-windows-x86-64-universal.zip",
+            sha256: "3c8bf1f9ea66a09350a40df4f632288285ac206d99f33ab5842c408fc30b48a7",
+            megabytes: 78,
+        }
+    } else if cfg!(all(target_os = "windows", target_arch = "aarch64")) {
+        StockfishAsset {
+            archive: "stockfish-windows-arm64-universal.zip",
+            sha256: "8372ad3f0d7276deb2c70f801f541ec7db463219fc6d9c7592864e542aa4f401",
+            megabytes: 77,
+        }
+    } else {
+        bail!("сборка Stockfish для этой системы не выбрана — нужна macOS или Windows")
+    })
+}
+
+/// Имя исполняемого файла движка в `vendor/` и рядом с приложением.
+fn stockfish_file() -> String {
+    format!("stockfish{}", env::consts::EXE_SUFFIX)
+}
 
 fn main() -> Result<()> {
     let args: Vec<String> = env::args().skip(1).collect();
@@ -34,8 +86,9 @@ fn main() -> Result<()> {
             eprintln!(
                 "использование: cargo xtask <команда> [--release]\n\n\
                  fetch-stockfish  скачать и проверить Stockfish 19 в vendor/\n\
-                 bundle           собрать «{APP_NAME}.app» в target/\n\
-                 run              собрать .app и запустить с выводом журнала в терминал\n\
+                 bundle           собрать приложение в target/: «{APP_NAME}.app» на macOS,\n\
+                 \x20                папка «{APP_NAME}» на Windows\n\
+                 run              собрать приложение и запустить с журналом в терминале\n\
                  ci               rustfmt, clippy без предупреждений, тесты"
             );
             bail!("не указана команда");
@@ -60,23 +113,22 @@ fn run_checked(command: &mut Command) -> Result<()> {
 }
 
 fn fetch_stockfish() -> Result<PathBuf> {
+    let asset = stockfish_asset()?;
     let dir = root().join("vendor/stockfish");
-    let binary = dir.join("stockfish");
+    let binary = dir.join(stockfish_file());
     let marker = dir.join("VERSION");
     if binary.exists() && fs::read_to_string(&marker).is_ok_and(|v| v.trim() == STOCKFISH_VERSION) {
         return Ok(binary);
     }
     let downloads = root().join("vendor/downloads");
     fs::create_dir_all(&downloads)?;
-    let archive = downloads.join("stockfish-macos-universal.tar.gz");
+    let archive = downloads.join(asset.archive);
 
-    println!("Загружаю Stockfish 19 (82 МБ)…");
-    run_checked(cmd("curl").args(["-fL", "--progress-bar", "-o"]).arg(&archive).arg(STOCKFISH_URL))?;
+    println!("Загружаю Stockfish 19 ({} МБ)…", asset.megabytes);
+    run_checked(cmd("curl").args(["-fL", "--progress-bar", "-o"]).arg(&archive).arg(asset.url()))?;
 
-    let output = cmd("shasum").args(["-a", "256"]).arg(&archive).output()?;
-    let digest = String::from_utf8_lossy(&output.stdout);
-    let digest = digest.split_whitespace().next().unwrap_or_default();
-    if digest != STOCKFISH_SHA256 {
+    let digest = sha256(&archive)?;
+    if digest != asset.sha256 {
         fs::remove_file(&archive).ok();
         bail!("контрольная сумма Stockfish не совпала: {digest}");
     }
@@ -84,19 +136,24 @@ fn fetch_stockfish() -> Result<PathBuf> {
     let unpacked = downloads.join("unpacked");
     fs::remove_dir_all(&unpacked).ok();
     fs::create_dir_all(&unpacked)?;
-    run_checked(cmd("tar").arg("xzf").arg(&archive).arg("-C").arg(&unpacked))?;
-    let universal = find_file(&unpacked, |path| {
-        path.file_name()
-            .and_then(|name| name.to_str())
-            .is_some_and(|name| name.starts_with("stockfish-macos"))
-            && path.extension().is_none()
+    // `tar` из macOS и из Windows (bsdtar) сам узнаёт и .tar.gz, и .zip.
+    run_checked(cmd("tar").arg("-xf").arg(&archive).arg("-C").arg(&unpacked))?;
+    let engine = find_file(&unpacked, |path| {
+        path.file_name().and_then(|name| name.to_str()).is_some_and(|name| {
+            name.starts_with("stockfish-")
+                && if cfg!(windows) { name.ends_with(".exe") } else { path.extension().is_none() }
+        })
     })
     .context("в архиве не нашёлся исполняемый файл Stockfish")?;
 
     fs::create_dir_all(&dir)?;
-    // Универсальная сборка содержит и x86_64, и arm64. Приложение только
-    // для Apple Silicon: вторая половина — лишние десятки мегабайт.
-    run_checked(cmd("lipo").arg(&universal).args(["-thin", "arm64", "-output"]).arg(&binary))?;
+    if cfg!(target_os = "macos") {
+        // Универсальная сборка содержит и x86_64, и arm64. Приложение только
+        // для Apple Silicon: вторая половина — лишние десятки мегабайт.
+        run_checked(cmd("lipo").arg(&engine).args(["-thin", "arm64", "-output"]).arg(&binary))?;
+    } else {
+        fs::copy(&engine, &binary)?;
+    }
     if let Some(license) = find_file(&unpacked, |path| {
         path.file_name()
             .and_then(|name| name.to_str())
@@ -108,6 +165,11 @@ fn fetch_stockfish() -> Result<PathBuf> {
     fs::remove_dir_all(&unpacked).ok();
     println!("Stockfish 19 готов: {}", binary.display());
     Ok(binary)
+}
+
+fn sha256(path: &Path) -> Result<String> {
+    let bytes = fs::read(path).with_context(|| format!("не удалось прочитать {}", path.display()))?;
+    Ok(Sha256::digest(&bytes).iter().map(|byte| format!("{byte:02x}")).collect())
 }
 
 fn find_file(dir: &Path, matches: impl Fn(&Path) -> bool + Copy) -> Option<PathBuf> {
@@ -124,6 +186,8 @@ fn find_file(dir: &Path, matches: impl Fn(&Path) -> bool + Copy) -> Option<PathB
     None
 }
 
+/// Собирает приложение и складывает его вместе с движком туда, откуда его
+/// можно запустить и отдать: `.app` на macOS, папку на Windows.
 fn bundle(release: bool) -> Result<PathBuf> {
     let stockfish = fetch_stockfish()?;
     let mut build = cmd("cargo");
@@ -135,6 +199,16 @@ fn bundle(release: bool) -> Result<PathBuf> {
 
     let profile = if release { "release" } else { "debug" };
     let target = root().join("target").join(profile);
+    if cfg!(target_os = "macos") {
+        bundle_macos(&target, &stockfish)
+    } else if cfg!(windows) {
+        bundle_windows(&target, &stockfish)
+    } else {
+        bail!("упаковка приложения есть только для macOS и Windows")
+    }
+}
+
+fn bundle_macos(target: &Path, stockfish: &Path) -> Result<PathBuf> {
     let app = target.join(format!("{APP_NAME}.app"));
     let contents = app.join("Contents");
     fs::remove_dir_all(&app).ok();
@@ -143,13 +217,8 @@ fn bundle(release: bool) -> Result<PathBuf> {
 
     fs::copy(target.join(EXECUTABLE), contents.join("MacOS").join(EXECUTABLE))?;
     let engine = contents.join("Resources/engines/stockfish");
-    fs::copy(&stockfish, &engine)?;
-    if let Some(dir) = stockfish.parent() {
-        let license = dir.join("COPYING.txt");
-        if license.exists() {
-            fs::copy(license, contents.join("Resources/engines/STOCKFISH-COPYING.txt"))?;
-        }
-    }
+    fs::copy(stockfish, &engine)?;
+    copy_stockfish_license(stockfish, &contents.join("Resources/engines"))?;
     fs::write(contents.join("Info.plist"), info_plist())?;
 
     // Подпись ad-hoc, изнутри наружу: сначала вложенный движок, потом само
@@ -158,6 +227,27 @@ fn bundle(release: bool) -> Result<PathBuf> {
     run_checked(cmd("codesign").args(["--force", "--sign", "-"]).arg(&engine))?;
     run_checked(cmd("codesign").args(["--force", "--sign", "-"]).arg(&app))?;
     Ok(app)
+}
+
+/// Папка приложения на Windows: программа под русским именем, рядом —
+/// `engines\stockfish.exe` (там его ищет `locate_stockfish`) и лицензии.
+fn bundle_windows(target: &Path, stockfish: &Path) -> Result<PathBuf> {
+    let folder = target.join(APP_NAME);
+    fs::remove_dir_all(&folder).ok();
+    fs::create_dir_all(folder.join("engines"))?;
+    fs::copy(target.join(format!("{EXECUTABLE}.exe")), folder.join(format!("{APP_NAME}.exe")))?;
+    fs::copy(stockfish, folder.join("engines").join(stockfish_file()))?;
+    copy_stockfish_license(stockfish, &folder.join("engines"))?;
+    fs::copy(root().join("LICENSE"), folder.join("LICENSE.txt"))?;
+    Ok(folder)
+}
+
+fn copy_stockfish_license(stockfish: &Path, into: &Path) -> Result<()> {
+    if let Some(license) = stockfish.parent().map(|dir| dir.join("COPYING.txt")).filter(|path| path.exists())
+    {
+        fs::copy(license, into.join("STOCKFISH-COPYING.txt"))?;
+    }
+    Ok(())
 }
 
 fn info_plist() -> String {
@@ -189,10 +279,15 @@ fn info_plist() -> String {
 }
 
 fn run(release: bool) -> Result<()> {
-    let app = bundle(release)?;
-    // Исполняемый файл внутри .app запускаем напрямую: так журнал идёт в
-    // терминал, а macOS всё равно видит приложение с его Info.plist.
-    run_checked(&mut Command::new(app.join("Contents/MacOS").join(EXECUTABLE)))
+    let bundle = bundle(release)?;
+    // Исполняемый файл запускаем напрямую: так журнал идёт в терминал, а
+    // macOS всё равно видит приложение с его Info.plist.
+    let executable = if cfg!(target_os = "macos") {
+        bundle.join("Contents/MacOS").join(EXECUTABLE)
+    } else {
+        bundle.join(format!("{APP_NAME}.exe"))
+    };
+    run_checked(&mut Command::new(executable))
 }
 
 fn ci() -> Result<()> {

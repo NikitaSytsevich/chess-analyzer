@@ -26,7 +26,7 @@ use gpui_kit::*;
 
 use crate::model::Model;
 use crate::pieces::PieceImages;
-use crate::pin::{self, Unpinned};
+use crate::platform::{self, Unpinned};
 use crate::theme::{self, hex};
 use crate::views::analysis::{ending_text, eval_bar, lines_card, score_card, verdict};
 use crate::views::board::{BoardProps, board};
@@ -50,16 +50,17 @@ actions!(
     ]
 );
 
-/// Клавиши окна. Глобальные (при фокусе на браузере) — отдельно, этап 3.
+/// Клавиши окна. `secondary` — ⌘ на macOS и Ctrl на Windows. Глобальные
+/// (при фокусе на браузере) — отдельно, этап 3.
 pub fn key_bindings() -> Vec<KeyBinding> {
     vec![
         KeyBinding::new("space", TogglePause, Some("Workspace")),
         KeyBinding::new("f", Flip, Some("Workspace")),
         KeyBinding::new("r", Relocate, Some("Workspace")),
-        KeyBinding::new("cmd-o", PickSource, Some("Workspace")),
-        KeyBinding::new("cmd-c", CopyFen, Some("Workspace")),
-        KeyBinding::new("cmd-shift-c", CopyPgn, Some("Workspace")),
-        KeyBinding::new("cmd-v", PasteFen, Some("Workspace")),
+        KeyBinding::new("secondary-o", PickSource, Some("Workspace")),
+        KeyBinding::new("secondary-c", CopyFen, Some("Workspace")),
+        KeyBinding::new("secondary-shift-c", CopyPgn, Some("Workspace")),
+        KeyBinding::new("secondary-v", PasteFen, Some("Workspace")),
         KeyBinding::new("enter", ConfirmBoard, Some("Workspace")),
         KeyBinding::new("i", TogglePanel, Some("Workspace")),
         KeyBinding::new("t", TogglePin, Some("Workspace")),
@@ -79,10 +80,8 @@ const GRAPH: f32 = 96.0;
 const PANEL: f32 = 390.0;
 const PANEL_MIN: f32 = 300.0;
 const MIN_SIDE: f32 = 240.0;
-/// Высота заголовка окна (`TitleBar` из gpui-component)…
+/// Высота заголовка окна (`TitleBar` из gpui-component).
 const TITLE: f32 = 34.0;
-/// …и его отступ слева под кнопки окна macOS.
-const WINDOW_CONTROLS: f32 = 80.0;
 /// Уже или ниже этого панель не помещается рядом с доской и прячется сама.
 /// Высота — заголовок, оценка, три линии, одна подсказка и несколько ходов.
 const FULL_MIN_WIDTH: f32 = PAD + MIN_SIDE + BAR + GAP + PAD + PANEL_MIN + PAD;
@@ -526,10 +525,10 @@ impl Workspace {
     /// экран, — или возвращает обычное поведение.
     fn toggle_pin(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let result = match self.pinned.take() {
-            Some(before) => pin::unpin(window, before).map(|()| "Окно больше не поверх других"),
-            None => pin::pin(window).map(|before| {
+            Some(before) => platform::unpin(window, before).map(|()| "Окно больше не поверх других"),
+            None => platform::pin(window).map(|before| {
                 self.pinned = Some(before);
-                "Окно поверх всех окон и на всех рабочих столах"
+                platform::PINNED_NOTICE
             }),
         };
         match result {
@@ -613,7 +612,10 @@ impl Workspace {
     /// кнопок не сжимается никогда.
     fn title_bar(&self, compact: bool, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
         let live = matches!(self.phase, Phase::Live);
-        let controls = if window.is_fullscreen() { WINDOW_CONTROLS + 12.0 } else { WINDOW_CONTROLS };
+        // Кнопки окна: на macOS «светофор» слева, на Windows — справа.
+        let controls = platform::TITLE_CONTROLS_LEFT
+            + platform::TITLE_CONTROLS_RIGHT
+            + if window.is_fullscreen() { 12.0 } else { 0.0 };
         let width = (window.viewport_size().width - px(controls)).max(px(0.));
         let status = match self.phase {
             Phase::Live if compact => self.title_score().into_any_element(),
@@ -648,9 +650,9 @@ impl Workspace {
     /// Кнопки заголовка — одной группой, как панель инструментов macOS.
     /// Показаны только те, что имеют смысл на текущем экране.
     fn toolbar(&self, compact: bool, live: bool, cx: &mut Context<Self>) -> impl IntoElement {
-        let tool = |id: &'static str, icon: Icon, tooltip: &'static str| {
+        fn tool(id: &'static str, icon: Icon, tooltip: impl Into<SharedString>) -> Button {
             Button::new(id).ghost().small().icon(icon).tooltip(tooltip)
-        };
+        }
         let pinned = self.pinned.is_some();
         div()
             .flex_shrink_0()
@@ -682,8 +684,12 @@ impl Workspace {
             })
             .when(live && !compact, |this| {
                 this.child(
-                    tool("source", Icon::new(IconName::ScreenShare), "Выбрать другое окно (⌘O)")
-                        .on_click(cx.listener(|this, _, _, cx| this.pick(cx))),
+                    tool(
+                        "source",
+                        Icon::new(IconName::ScreenShare),
+                        format!("Выбрать другое окно ({}O)", platform::COMMAND),
+                    )
+                    .on_click(cx.listener(|this, _, _, cx| this.pick(cx))),
                 )
             })
             .child(
@@ -837,7 +843,7 @@ impl Workspace {
                         .text_xs()
                         .text_center()
                         .text_color(hex(theme::FAINT))
-                        .child("macOS покажет список окон — выберите окно браузера или плеера. Разрешение на запись экрана не понадобится."),
+                        .child(platform::PICKER_HINT),
                 ),
         )
     }

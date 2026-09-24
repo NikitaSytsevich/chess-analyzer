@@ -28,8 +28,17 @@ pub(crate) struct ProcessTransport {
 
 impl ProcessTransport {
     pub(crate) fn spawn(path: &Path) -> io::Result<Self> {
-        let mut child =
-            Command::new(path).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn()?;
+        let mut command = Command::new(path);
+        command.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null());
+        // На Windows консольная программа, запущенная из оконной, открывает
+        // своё окно консоли — движку оно не нужно.
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt as _;
+            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+            command.creation_flags(CREATE_NO_WINDOW);
+        }
+        let mut child = command.spawn()?;
         let stdin = child.stdin.take().expect("stdin is piped");
         let stdout = child.stdout.take().expect("stdout is piped");
         let (tx, lines) = flume::unbounded();

@@ -1,6 +1,6 @@
 [package]
 name = "analyzer-capture"
-description = "Захват окна трансляции через ScreenCaptureKit"
+description = "Захват окна трансляции: ScreenCaptureKit на macOS"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -10,9 +10,11 @@ publish.workspace = true
 
 [dependencies]
 analyzer-vision = { path = "../vision" }
-screencapturekit.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+screencapturekit.workspace = true
 
 [lints]
 workspace = true

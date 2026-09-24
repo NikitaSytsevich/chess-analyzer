@@ -1,6 +1,7 @@
+//! macOS.
+//!
 //! «Поверх всех окон»: окно анализатора висит над трансляцией, даже когда
 //! браузер развёрнут на весь экран или открыт на другом рабочем столе.
-//!
 //! GPUI задаёт уровень окна только при его создании, поэтому закрепление
 //! меняет уровень и поведение в Spaces напрямую у NSWindow под окном GPUI.
 
@@ -9,6 +10,18 @@ use gpui_kit::Window;
 use objc2::rc::Retained;
 use objc2_app_kit::{NSFloatingWindowLevel, NSView, NSWindow, NSWindowCollectionBehavior, NSWindowLevel};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+
+/// Моноширинный шрифт цифр.
+pub const MONO_FONT: &str = "Menlo";
+/// Приписка модификатора в подсказках клавиш: «⌘O».
+pub const COMMAND: &str = "⌘";
+/// Место под кнопки окна в заголовке: «светофор» слева, справа — ничего.
+pub const TITLE_CONTROLS_LEFT: f32 = 80.0;
+pub const TITLE_CONTROLS_RIGHT: f32 = 0.0;
+pub const PINNED_NOTICE: &str = "Окно поверх всех окон и на всех рабочих столах";
+
+/// Подсказка под кнопкой выбора окна трансляции.
+pub const PICKER_HINT: &str = "macOS покажет список окон — выберите окно браузера или плеера. Разрешение на запись экрана не понадобится.";
 
 /// Каким окно было до закрепления — чтобы открепить его ровно в то же.
 #[derive(Clone, Copy, Debug)]
