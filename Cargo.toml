@@ -48,6 +48,17 @@ debug = "line-tables-only"
 [profile.dev.package."*"]
 opt-level = 1
 
+# Распознавание перебирает каждый пиксель кадра: без оптимизаций оно в
+# десятки раз медленнее и не укладывается в бюджет даже в отладочной сборке.
+[profile.dev.package.analyzer-vision]
+opt-level = 3
+
+[profile.dev.package.resvg]
+opt-level = 3
+
+[profile.dev.package.tiny-skia]
+opt-level = 3
+
 [profile.release]
 lto = "thin"
 codegen-units = 4
