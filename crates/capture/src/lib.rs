@@ -8,11 +8,10 @@
 //! распознавание никогда не отстаёт от трансляции.
 
 mod session;
-mod slot;
 mod source;
 
+pub use analyzer_vision::FrameSlot;
 pub use session::{CaptureConfig, CaptureSession, CaptureStats, RegionF};
-pub use slot::FrameSlot;
 pub use source::{Source, pick_source};
 
 /// Ошибка захвата, понятная без знания ScreenCaptureKit.

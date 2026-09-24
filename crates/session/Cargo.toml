@@ -1,0 +1,20 @@
+[package]
+name = "analyzer-session"
+description = "Сессия анализа: кадры → распознавание → партия → движок → оценки и подсказки"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[dependencies]
+analyzer-chess.workspace = true
+analyzer-engine.workspace = true
+analyzer-tracker.workspace = true
+analyzer-vision.workspace = true
+flume.workspace = true
+tracing.workspace = true
+
+[lints]
+workspace = true

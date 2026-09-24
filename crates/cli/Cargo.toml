@@ -1,0 +1,25 @@
+[package]
+name = "analyzer-cli"
+description = "Консольный запуск анализа: синтетическая партия, папка кадров, живое окно"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "chess-analyzer-cli"
+path = "src/main.rs"
+
+[dependencies]
+analyzer-chess.workspace = true
+analyzer-engine.workspace = true
+analyzer-session.workspace = true
+analyzer-vision.workspace = true
+anyhow.workspace = true
+flume.workspace = true
+tracing-subscriber.workspace = true
+
+[lints]
+workspace = true

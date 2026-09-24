@@ -1,7 +1,7 @@
 use std::sync::{Condvar, Mutex};
 use std::time::Duration;
 
-use analyzer_vision::Frame;
+use crate::Frame;
 
 /// Ячейка «последний кадр».
 ///

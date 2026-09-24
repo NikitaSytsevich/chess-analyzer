@@ -188,12 +188,37 @@ dependencies = [
 ]
 
 [[package]]
+name = "analyzer-cli"
+version = "0.1.0"
+dependencies = [
+ "analyzer-chess",
+ "analyzer-engine",
+ "analyzer-session",
+ "analyzer-vision",
+ "anyhow",
+ "flume",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "analyzer-engine"
 version = "0.1.0"
 dependencies = [
  "analyzer-chess",
  "flume",
  "thiserror 2.0.21",
+ "tracing",
+]
+
+[[package]]
+name = "analyzer-session"
+version = "0.1.0"
+dependencies = [
+ "analyzer-chess",
+ "analyzer-engine",
+ "analyzer-tracker",
+ "analyzer-vision",
+ "flume",
  "tracing",
 ]
 

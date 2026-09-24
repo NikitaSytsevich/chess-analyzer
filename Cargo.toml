@@ -17,6 +17,7 @@ publish = false
 analyzer-capture = { path = "crates/capture" }
 analyzer-chess = { path = "crates/chess" }
 analyzer-engine = { path = "crates/engine" }
+analyzer-session = { path = "crates/session" }
 analyzer-tracker = { path = "crates/tracker" }
 analyzer-vision = { path = "crates/vision" }
 

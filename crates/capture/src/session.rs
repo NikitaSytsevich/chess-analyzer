@@ -2,13 +2,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use analyzer_vision::Frame;
+use analyzer_vision::{Frame, FrameSlot};
 use screencapturekit::cm::SCFrameStatus;
 use screencapturekit::cv::CVPixelBufferLockFlags;
 use screencapturekit::prelude::*;
 use screencapturekit::stream::delegate_trait::StreamCallbacks;
 
-use crate::{CaptureError, FrameSlot, Source};
+use crate::{CaptureError, Source};
 
 /// Прямоугольник в долях окна: `0.0..=1.0` по обеим осям, начало — левый
 /// верхний угол. Доли, а не точки: область доски переживает изменение
