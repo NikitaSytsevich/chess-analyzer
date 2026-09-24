@@ -76,6 +76,27 @@ pub fn eval_graph(
                         Bounds::new(point(origin.x, y(0.5)), size(bounds.size.width, px(1.))),
                         hex(theme::ACCENT).opacity(0.5),
                     ));
+                    // Где партия сейчас: волосок через весь график и точка на кривой.
+                    if let Some(&share) = shares.last()
+                        && shares.len() >= 2
+                    {
+                        let now = x(shares.len() - 1);
+                        window.paint_quad(fill(
+                            Bounds::new(point(now - px(0.5), origin.y), size(px(1.), bounds.size.height)),
+                            hex(theme::ACCENT).opacity(0.35),
+                        ));
+                        let r = px(4.);
+                        let center = point(now, y(share));
+                        window.paint_quad(
+                            fill(
+                                Bounds::new(point(center.x - r, center.y - r), size(r * 2., r * 2.)),
+                                hex(theme::ACCENT),
+                            )
+                            .corner_radii(r)
+                            .border_widths(px(1.5))
+                            .border_color(hex(theme::BLACK_SIDE)),
+                        );
+                    }
                     for (ply, color) in &marks {
                         let Some(share) = shares.get(*ply) else { continue };
                         let center = point(x(*ply), y(*share));

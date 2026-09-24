@@ -28,7 +28,7 @@ use crate::model::Model;
 use crate::pieces::PieceImages;
 use crate::pin::{self, Unpinned};
 use crate::theme::{self, hex};
-use crate::views::analysis::{ending_text, eval_bar, lines_card, score_card};
+use crate::views::analysis::{ending_text, eval_bar, lines_card, score_card, verdict};
 use crate::views::board::{BoardProps, board};
 use crate::views::graph::eval_graph;
 use crate::views::moves::{hints_card, moves_card};
@@ -74,14 +74,18 @@ const BAR: f32 = 14.0;
 const GAP: f32 = 12.0;
 /// График оценки под доской.
 const GRAPH: f32 = 96.0;
-/// Правая панель: оценка, линии, подсказки, ходы.
+/// Правая панель: оценка, линии, подсказки, ходы. В узком окне она
+/// уступает место доске, но не уже, чем нужно, чтобы читались линии.
 const PANEL: f32 = 390.0;
+const PANEL_MIN: f32 = 300.0;
 const MIN_SIDE: f32 = 240.0;
-/// Высота заголовка окна (`TitleBar` из gpui-component).
+/// Высота заголовка окна (`TitleBar` из gpui-component)…
 const TITLE: f32 = 34.0;
+/// …и его отступ слева под кнопки окна macOS.
+const WINDOW_CONTROLS: f32 = 80.0;
 /// Уже или ниже этого панель не помещается рядом с доской и прячется сама.
 /// Высота — заголовок, оценка, три линии, одна подсказка и несколько ходов.
-const FULL_MIN_WIDTH: f32 = PAD + MIN_SIDE + BAR + GAP + PAD + PANEL + PAD;
+const FULL_MIN_WIDTH: f32 = PAD + MIN_SIDE + BAR + GAP + PAD + PANEL_MIN + PAD;
 const FULL_MIN_HEIGHT: f32 = 560.0;
 
 /// Сообщения из чужих потоков: колбэки ScreenCaptureKit приходят из его
@@ -270,6 +274,44 @@ impl Workspace {
         self.notice = Some(text.into());
         self.notice_until = None;
         cx.notify();
+    }
+
+    /// Уведомление — всплывашка внизу поверх содержимого: появляясь, она не
+    /// сдвигает доску. Сделанное гаснет само, проблему можно закрыть.
+    fn toast(&self, text: SharedString, cx: &mut Context<Self>) -> impl IntoElement {
+        let problem = self.notice_until.is_none();
+        let (icon, color) = if problem {
+            (IconName::TriangleAlert, theme::MISTAKE)
+        } else {
+            (IconName::CircleCheck, theme::GOOD)
+        };
+        div().absolute().left_0().right_0().bottom(px(20.)).px_4().flex().justify_center().child(
+            div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .max_w(px(560.))
+                .min_h(px(36.))
+                .pl_3()
+                .pr(px(if problem { 4. } else { 14. }))
+                .py_1()
+                .rounded_lg()
+                .bg(hex(theme::RAISED))
+                .border_1()
+                .border_color(hex(theme::BORDER))
+                .shadow_lg()
+                .text_sm()
+                .child(Icon::new(icon).text_color(hex(color)).flex_shrink_0())
+                .child(div().min_w_0().child(text))
+                .when(problem, |this| {
+                    this.child(Button::new("dismiss").ghost().xsmall().icon(IconName::X).on_click(
+                        cx.listener(|this, _, _, cx| {
+                            this.notice = None;
+                            cx.notify();
+                        }),
+                    ))
+                }),
+        )
     }
 
     fn send(&self, command: Command) {
@@ -561,107 +603,157 @@ impl Workspace {
         orientation != Some(Orientation::BlackBottom)
     }
 
-    /// Заголовок окна. В полном виде — индикаторы захвата, распознавания и
-    /// движка; в узком их не уместить, и там, где нет панели, стоит оценка:
-    /// число рядом со шкалой комментатору всё равно нужно.
-    fn title_bar(&self, compact: bool, cx: &mut Context<Self>) -> impl IntoElement {
+    /// Заголовок окна: слева — состояние (индикаторы захвата, распознавания
+    /// и движка, а в узком окне без панели — оценка), справа — кнопки.
+    ///
+    /// Ряд заголовка у gpui-component не сжимается: его ширина — сумма
+    /// содержимого, и в узком окне лишнее уезжало за правый край вместе с
+    /// кнопками. Поэтому содержимому задана ширина окна за вычетом кнопок
+    /// окна слева: внутри индикаторы сжимаются и обрезают подпись, а панель
+    /// кнопок не сжимается никогда.
+    fn title_bar(&self, compact: bool, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
         let live = matches!(self.phase, Phase::Live);
-        let left = if compact && live {
-            self.title_score().into_any_element()
-        } else {
-            div().text_sm().font_weight(FontWeight::SEMIBOLD).child("Шахматный анализатор").into_any_element()
-        };
-        let chips = (!compact).then(|| self.status_chips());
-        TitleBar::new().child(left).child(
-            div()
+        let controls = if window.is_fullscreen() { WINDOW_CONTROLS + 12.0 } else { WINDOW_CONTROLS };
+        let width = (window.viewport_size().width - px(controls)).max(px(0.));
+        let status = match self.phase {
+            Phase::Live if compact => self.title_score().into_any_element(),
+            Phase::Live | Phase::Placing(_) => div()
                 .flex()
                 .items_center()
-                .gap_2()
-                .pr_2()
-                .children(chips.into_iter().flatten())
-                .child(
-                    Button::new("pause")
-                        .ghost()
-                        .icon(if self.paused { IconName::Play } else { IconName::Pause })
-                        .tooltip(if self.paused {
-                            "Продолжить анализ (пробел)"
-                        } else {
-                            "Пауза (пробел)"
-                        })
-                        .on_click(cx.listener(|this, _, _, cx| this.toggle_pause(cx))),
-                )
-                .child(
-                    Button::new("flip")
-                        .ghost()
-                        .icon(IconName::FlipVertical2)
-                        .tooltip("Перевернуть доску (F)")
-                        .on_click(cx.listener(|this, _, _, _| this.send(Command::Flip))),
-                )
-                .children((!compact).then(|| {
-                    Button::new("source")
-                        .ghost()
-                        .icon(IconName::ScreenShare)
-                        .tooltip("Выбрать другое окно (⌘O)")
-                        .on_click(cx.listener(|this, _, _, cx| this.pick(cx)))
-                }))
-                .child(
-                    Button::new("pin")
-                        .ghost()
-                        // Закреплённое окно видно сразу: булавка горит акцентом.
-                        .icon(
-                            Icon::new(IconName::Pin)
-                                .when(self.pinned.is_some(), |icon| icon.text_color(hex(theme::ACCENT))),
-                        )
-                        .selected(self.pinned.is_some())
-                        .tooltip(if self.pinned.is_some() {
-                            "Не держать поверх окон (T)"
-                        } else {
-                            "Поверх всех окон (T)"
-                        })
-                        .on_click(cx.listener(|this, _, window, cx| this.toggle_pin(window, cx))),
-                )
-                .children(live.then(|| {
-                    Button::new("panel")
-                        .ghost()
-                        .icon(if compact { IconName::PanelRightOpen } else { IconName::PanelRightClose })
-                        .tooltip(if compact {
-                            "Показать панель анализа (I)"
-                        } else {
-                            "Только доска (I)"
-                        })
-                        .on_click(cx.listener(|this, _, window, cx| this.toggle_panel(window, cx)))
-                })),
+                .gap_1p5()
+                .min_w_0()
+                .children(self.status_chips(live))
+                .into_any_element(),
+            Phase::Welcome | Phase::Picking => div()
+                .text_sm()
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(hex(theme::MUTED))
+                .child("Шахматный анализатор")
+                .into_any_element(),
+        };
+        TitleBar::new().child(
+            div()
+                .w(width)
+                .h_full()
+                .flex()
+                .items_center()
+                .justify_between()
+                .gap_3()
+                .pr_1p5()
+                .child(div().flex_1().min_w_0().flex().items_center().child(status))
+                .child(self.toolbar(compact, live, cx)),
         )
     }
 
-    fn status_chips(&self) -> [AnyElement; 3] {
+    /// Кнопки заголовка — одной группой, как панель инструментов macOS.
+    /// Показаны только те, что имеют смысл на текущем экране.
+    fn toolbar(&self, compact: bool, live: bool, cx: &mut Context<Self>) -> impl IntoElement {
+        let tool = |id: &'static str, icon: Icon, tooltip: &'static str| {
+            Button::new(id).ghost().small().icon(icon).tooltip(tooltip)
+        };
+        let pinned = self.pinned.is_some();
+        div()
+            .flex_shrink_0()
+            .flex()
+            .items_center()
+            .gap_0p5()
+            .p(px(2.))
+            .rounded_lg()
+            .bg(hex(theme::PANEL))
+            .border_1()
+            .border_color(hex(theme::BORDER))
+            .when(live, |this| {
+                this.child(
+                    tool(
+                        "pause",
+                        Icon::new(if self.paused { IconName::Play } else { IconName::Pause }),
+                        if self.paused {
+                            "Продолжить анализ (пробел)"
+                        } else {
+                            "Пауза (пробел)"
+                        },
+                    )
+                    .on_click(cx.listener(|this, _, _, cx| this.toggle_pause(cx))),
+                )
+                .child(
+                    tool("flip", Icon::new(IconName::FlipVertical2), "Перевернуть доску (F)")
+                        .on_click(cx.listener(|this, _, _, _| this.send(Command::Flip))),
+                )
+            })
+            .when(live && !compact, |this| {
+                this.child(
+                    tool("source", Icon::new(IconName::ScreenShare), "Выбрать другое окно (⌘O)")
+                        .on_click(cx.listener(|this, _, _, cx| this.pick(cx))),
+                )
+            })
+            .child(
+                // Закреплённое окно видно сразу: булавка горит акцентом.
+                tool(
+                    "pin",
+                    Icon::new(IconName::Pin).when(pinned, |icon| icon.text_color(hex(theme::ACCENT))),
+                    if pinned {
+                        "Не держать поверх окон (T)"
+                    } else {
+                        "Поверх всех окон (T)"
+                    },
+                )
+                .selected(pinned)
+                .on_click(cx.listener(|this, _, window, cx| this.toggle_pin(window, cx))),
+            )
+            .when(live, |this| {
+                this.child(
+                    tool(
+                        "panel",
+                        Icon::new(if compact { IconName::PanelRightOpen } else { IconName::PanelRightClose }),
+                        if compact {
+                            "Показать панель анализа (I)"
+                        } else {
+                            "Только доска (I)"
+                        },
+                    )
+                    .on_click(cx.listener(|this, _, window, cx| this.toggle_panel(window, cx))),
+                )
+            })
+    }
+
+    /// Индикаторы: трансляция (сжимается первой — её название бывает очень
+    /// длинным), распознавание доски (только на экране анализа) и движок.
+    fn status_chips(&self, live: bool) -> Vec<AnyElement> {
         let capture = match (&self.capture, &self.source_title) {
-            (None, Some(title)) if self.demo.is_some() => chip(theme::INFO, title.clone()),
+            (None, Some(title)) if self.demo.is_some() => chip(theme::INFO, title.clone(), None),
             (Some(_), Some(title)) => chip(
                 if self.capture_fps > 0.0 { theme::GOOD } else { theme::MUTED },
-                format!("{title} · {:.0} к/с", self.capture_fps).into(),
+                title.clone(),
+                Some(format!("{:.0} к/с", self.capture_fps).into()),
             ),
-            _ => chip(theme::FAINT, "Трансляция не подключена".into()),
+            _ => chip(theme::FAINT, "Трансляция не подключена".into(), None),
         };
         let board = match self.model.recognition.as_ref() {
             Some(r) if r.board_found => chip(
                 if r.mean_confidence > 0.6 { theme::GOOD } else { theme::INACCURACY },
                 format!("Доска {:.0}%", r.mean_confidence * 100.0).into(),
+                None,
             ),
-            Some(_) => chip(theme::MISTAKE, "Доска не видна".into()),
-            None => chip(theme::FAINT, "Доска —".into()),
+            Some(_) => chip(theme::MISTAKE, "Доска не видна".into(), None),
+            None => chip(theme::FAINT, "Доска —".into(), None),
         };
         let engine = match (&self.model.engine_name, &self.model.engine_error) {
-            (_, Some(_)) => chip(theme::BLUNDER, "Движок перезапускается".into()),
+            (_, Some(_)) => chip(theme::BLUNDER, "Движок перезапускается".into(), None),
             (Some(name), None) => {
-                chip(if self.paused { theme::INACCURACY } else { theme::GOOD }, name.clone().into())
+                chip(if self.paused { theme::INACCURACY } else { theme::GOOD }, name.clone().into(), None)
             }
-            (None, None) => chip(theme::FAINT, "Движок запускается".into()),
+            (None, None) => chip(theme::FAINT, "Движок запускается".into(), None),
         };
-        [capture.into_any_element(), board.into_any_element(), engine.into_any_element()]
+        let mut chips = vec![capture.into_any_element()];
+        if live {
+            chips.push(board.flex_shrink_0().into_any_element());
+        }
+        chips.push(engine.flex_shrink_0().into_any_element());
+        chips
     }
 
-    /// Оценка для заголовка узкого окна: число и под ним глубина.
+    /// Оценка для заголовка окна без панели: число, словами и глубина.
+    /// Словами — важнее всего: без панели это единственный текст об оценке.
     fn title_score(&self) -> impl IntoElement {
         let best = self.model.analysis.as_ref().and_then(|a| a.best().map(|line| (a.depth, line.score)));
         let (value, color, detail): (SharedString, u32, SharedString) = match (self.model.ending(), best) {
@@ -670,7 +762,7 @@ impl Workspace {
             (None, Some((depth, score))) => (
                 score.to_string().into(),
                 if matches!(score, Score::Mate(_)) { theme::ACCENT } else { theme::TEXT },
-                format!("глубина {depth}").into(),
+                format!("{} · глубина {depth}", verdict(score)).into(),
             ),
             (None, None) => ("—".into(), theme::MUTED, "движок думает".into()),
         };
@@ -678,15 +770,17 @@ impl Workspace {
             .flex()
             .items_baseline()
             .gap_2()
+            .min_w_0()
             .child(
                 div()
+                    .flex_shrink_0()
                     .font_family(theme::MONO)
                     .text_base()
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(hex(color))
                     .child(value),
             )
-            .child(div().text_xs().text_color(hex(theme::MUTED)).child(detail))
+            .child(div().min_w_0().truncate().text_xs().text_color(hex(theme::MUTED)).child(detail))
     }
 
     fn welcome(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -956,12 +1050,12 @@ impl Workspace {
                             }),
                     ),
             )
-            .when(!compact, |this| this.child(self.panel(position.as_ref())))
+            .when(!compact, |this| this.child(self.panel(panel_width(window), position.as_ref())))
     }
 
-    fn panel(&self, position: Option<&Chess>) -> impl IntoElement {
+    fn panel(&self, width: f32, position: Option<&Chess>) -> impl IntoElement {
         div()
-            .w(px(PANEL))
+            .w(px(width))
             .flex_shrink_0()
             .min_h_0()
             .flex()
@@ -982,6 +1076,11 @@ impl Workspace {
                 &self.moves_scroll,
             ))
     }
+}
+
+/// Ширина правой панели: треть окна, от `PANEL_MIN` до `PANEL`.
+fn panel_width(window: &Window) -> f32 {
+    (f32::from(window.viewport_size().width) * 0.34).clamp(PANEL_MIN, PANEL)
 }
 
 /// Где на экране окажется кадр `width`×`height`, вписанный в `space` целиком
@@ -1079,21 +1178,9 @@ impl Render for Workspace {
             .flex_col()
             .bg(hex(theme::BACKGROUND))
             .text_color(hex(theme::TEXT))
-            .child(self.title_bar(compact, cx))
-            .children(self.notice.clone().map(|notice| {
-                div()
-                    .mx_4()
-                    .mb_2()
-                    .px_3()
-                    .py_2()
-                    .rounded_md()
-                    .bg(hex(theme::RAISED))
-                    .border_1()
-                    .border_color(hex(theme::BORDER))
-                    .text_sm()
-                    .text_color(hex(theme::MUTED))
-                    .child(notice)
-            }))
+            .relative()
+            .child(self.title_bar(compact, window, cx))
             .child(body)
+            .children(self.notice.clone().map(|notice| self.toast(notice, cx)))
     }
 }

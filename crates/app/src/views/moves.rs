@@ -51,8 +51,10 @@ pub fn moves_card(
                 .text_sm()
                 .text_color(hex(theme::TEXT))
                 .child(format_san(&ply.san, notation));
+            // Последний ход — мягкой золотой заливкой: заметно, но не громче
+            // знаков ошибок рядом.
             if current {
-                cell = cell.bg(hex(theme::RAISED)).border_1().border_color(hex(theme::ACCENT));
+                cell = cell.bg(hex(theme::ACCENT).opacity(0.16)).text_color(hex(theme::ACCENT));
             }
             if let Some(symbol) = class.and_then(|c| c.symbol().map(|s| (c, s))) {
                 cell = cell.child(

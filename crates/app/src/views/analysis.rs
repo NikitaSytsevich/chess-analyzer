@@ -21,7 +21,7 @@ pub fn eval_bar(share: f32, white_bottom: bool) -> impl IntoElement {
         .relative()
         .w(px(14.))
         .h_full()
-        .rounded_md()
+        .rounded_full()
         .overflow_hidden()
         .flex()
         .flex_col()
@@ -83,8 +83,25 @@ pub fn score_card(
                 .flex()
                 .items_end()
                 .justify_between()
+                .gap_3()
                 .child(big_number(score_text, score_color))
-                .child(div().text_xs().text_color(hex(theme::MUTED)).pb_1().child(status)),
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .items_end()
+                        .gap_0p5()
+                        .pb_1()
+                        .min_w_0()
+                        .children(best.map(|line| {
+                            div()
+                                .text_sm()
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(hex(theme::TEXT))
+                                .child(verdict(line.score))
+                        }))
+                        .child(div().text_xs().text_color(hex(theme::MUTED)).child(status)),
+                ),
         )
         .children(wdl.map(wdl_bar))
         .into_any_element()
@@ -125,6 +142,29 @@ fn big_number(text: impl Into<SharedString>, color: Hsla) -> impl IntoElement {
         .font_weight(FontWeight::SEMIBOLD)
         .text_color(color)
         .child(text.into())
+}
+
+/// Оценка словами — фраза, которую комментатор скажет вместо числа.
+/// Границы — привычные: до трети пешки равенство, до пешки «чуть лучше»,
+/// до двух — перевес, до пяти — большой перевес, дальше — выигрыш.
+pub fn verdict(score: Score) -> String {
+    // Кто впереди: «у белых», «перевес белых» — и «белые выигрывают».
+    let names =
+        |white: bool| if white { ("белых", "Белые") } else { ("чёрных", "Чёрные") };
+    match score {
+        Score::Mate(0) => "Мат".into(),
+        Score::Mate(n) => format!("{} ставят мат", names(n > 0).1),
+        Score::Cp(cp) => {
+            let (genitive, nominative) = names(cp > 0);
+            match cp.unsigned_abs() {
+                0..=30 => "Равная позиция".into(),
+                31..=90 => format!("Чуть лучше у {genitive}"),
+                91..=200 => format!("Перевес {genitive}"),
+                201..=500 => format!("Большой перевес {genitive}"),
+                _ => format!("{nominative} выигрывают"),
+            }
+        }
+    }
 }
 
 /// Полоса шансов: белые — ничья — чёрные, с процентами под ней.
@@ -173,6 +213,15 @@ pub fn lines_card(
                 .map(|(index, line)| {
                     let moves = &line.moves[..line.moves.len().min(10)];
                     let marker = theme::ARROWS[index.min(2)] | 0xFF;
+                    // Первый ход — цветом своей стрелки на доске: глаз сразу
+                    // связывает строку со стрелкой.
+                    let text = line_text(position, moves, notation);
+                    let first = line_text(position, &moves[..moves.len().min(1)], notation).len();
+                    let first_move = HighlightStyle {
+                        color: Some(theme::hexa(marker)),
+                        font_weight: Some(FontWeight::SEMIBOLD),
+                        ..HighlightStyle::default()
+                    };
                     div()
                         .flex()
                         .items_center()
@@ -198,7 +247,7 @@ pub fn lines_card(
                                 .whitespace_nowrap()
                                 .overflow_hidden()
                                 .text_ellipsis()
-                                .child(line_text(position, moves, notation)),
+                                .child(StyledText::new(text).with_highlights([(0..first, first_move)])),
                         )
                 })
                 .collect::<Vec<_>>()
@@ -221,7 +270,7 @@ pub fn card() -> Div {
         .flex()
         .flex_col()
         .p_4()
-        .rounded_lg()
+        .rounded_xl()
         .bg(hex(theme::PANEL))
         .border_1()
         .border_color(hex(theme::BORDER))
@@ -234,4 +283,22 @@ pub fn section_title(text: &'static str) -> impl IntoElement {
         .text_color(hex(theme::FAINT))
         .pb_1()
         .child(text.to_uppercase())
+}
+
+#[cfg(test)]
+mod tests {
+    // Не `super::*`: вместе с GPUI пришёл бы и его `#[test]` вместо обычного.
+    use analyzer_chess::Score;
+
+    use super::verdict;
+
+    #[test]
+    fn the_verdict_reads_like_a_commentator() {
+        assert_eq!(verdict(Score::Cp(12)), "Равная позиция");
+        assert_eq!(verdict(Score::Cp(-60)), "Чуть лучше у чёрных");
+        assert_eq!(verdict(Score::Cp(162)), "Перевес белых");
+        assert_eq!(verdict(Score::Cp(-288)), "Большой перевес чёрных");
+        assert_eq!(verdict(Score::Cp(900)), "Белые выигрывают");
+        assert_eq!(verdict(Score::Mate(-3)), "Чёрные ставят мат");
+    }
 }
