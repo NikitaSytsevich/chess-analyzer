@@ -1,5 +1,7 @@
 //! График оценки по полуходам: над серединой — перевес белых, под ней —
-//! чёрных; ошибки отмечены точками своего цвета.
+//! чёрных. Граница сторон прочерчена «глиной», ошибки отмечены точками
+//! своего цвета, текущий ход — волоском и точкой. Ещё не сыгранная часть
+//! партии — пустая подложка: график растёт слева направо по ходу игры.
 
 use std::collections::HashMap;
 
@@ -7,9 +9,13 @@ use analyzer_chess::{Assessment, Move, MoveClass, Score};
 use gpui_kit::*;
 
 use crate::model::white_share;
-use crate::theme::{self, class_color, hex};
+use crate::theme::{Palette, class_color, hex, hexa};
+
+/// Высота графика.
+pub const GRAPH: f32 = 56.0;
 
 pub fn eval_graph(
+    p: &Palette,
     evals: &[Option<Score>],
     assessments: &HashMap<usize, (Assessment, Option<Move>)>,
 ) -> impl IntoElement {
@@ -30,15 +36,16 @@ pub fn eval_graph(
         .filter(|(_, (a, _))| a.class >= MoveClass::Inaccuracy)
         .map(|(ply, (a, _))| (*ply, class_color(a.class)))
         .collect();
+    let p = *p;
 
     div()
-        .h(px(96.))
+        .h(px(GRAPH))
         .w_full()
         .rounded_lg()
         .overflow_hidden()
-        .bg(hex(theme::BLACK_SIDE))
+        .bg(hex(p.sunken))
         .border_1()
-        .border_color(hex(theme::BORDER))
+        .border_color(hexa(p.hairline))
         .child(
             canvas(
                 |_, _, _| {},
@@ -53,29 +60,39 @@ pub fn eval_graph(
                     let x = |i: usize| origin.x + px(i as f32 * step);
                     let y = |share: f32| origin.y + px(height * (1.0 - share));
 
+                    // Линия равенства — под кривой: она лишь опора для глаза.
+                    window.paint_quad(fill(
+                        Bounds::new(point(origin.x, y(0.5)), size(bounds.size.width, px(1.))),
+                        hexa(p.hairline),
+                    ));
                     if shares.len() >= 2 {
+                        // Сыгранная часть: сторона чёрных — фоном, белых — заливкой под кривой.
+                        let played = x(shares.len() - 1) - origin.x;
+                        window.paint_quad(fill(
+                            Bounds::new(origin, size(played, bounds.size.height)),
+                            hex(p.black_side),
+                        ));
+                        window.paint_quad(fill(
+                            Bounds::new(point(origin.x, y(0.5)), size(played, px(1.))),
+                            hex(p.white_side).opacity(0.22),
+                        ));
                         let mut area = PathBuilder::fill();
                         let mut points = vec![point(x(0), origin.y + px(height))];
                         points.extend(shares.iter().enumerate().map(|(i, s)| point(x(i), y(*s))));
                         points.push(point(x(shares.len() - 1), origin.y + px(height)));
                         area.add_polygon(&points, true);
                         if let Ok(path) = area.build() {
-                            window.paint_path(path, hex(theme::WHITE_SIDE).opacity(0.85));
+                            window.paint_path(path, hex(p.white_side));
                         }
                         let mut line = PathBuilder::stroke(px(1.5));
                         for (i, share) in shares.iter().enumerate() {
-                            let p = point(x(i), y(*share));
-                            if i == 0 { line.move_to(p) } else { line.line_to(p) }
+                            let point = point(x(i), y(*share));
+                            if i == 0 { line.move_to(point) } else { line.line_to(point) }
                         }
                         if let Ok(path) = line.build() {
-                            window.paint_path(path, hex(theme::WHITE_SIDE));
+                            window.paint_path(path, hex(p.accent));
                         }
                     }
-                    // Линия равенства.
-                    window.paint_quad(fill(
-                        Bounds::new(point(origin.x, y(0.5)), size(bounds.size.width, px(1.))),
-                        hex(theme::ACCENT).opacity(0.5),
-                    ));
                     // Где партия сейчас: волосок через весь график и точка на кривой.
                     if let Some(&share) = shares.last()
                         && shares.len() >= 2
@@ -83,18 +100,18 @@ pub fn eval_graph(
                         let now = x(shares.len() - 1);
                         window.paint_quad(fill(
                             Bounds::new(point(now - px(0.5), origin.y), size(px(1.), bounds.size.height)),
-                            hex(theme::ACCENT).opacity(0.35),
+                            hex(p.accent).opacity(0.45),
                         ));
                         let r = px(4.);
                         let center = point(now, y(share));
                         window.paint_quad(
                             fill(
                                 Bounds::new(point(center.x - r, center.y - r), size(r * 2., r * 2.)),
-                                hex(theme::ACCENT),
+                                hex(p.accent),
                             )
                             .corner_radii(r)
                             .border_widths(px(1.5))
-                            .border_color(hex(theme::BLACK_SIDE)),
+                            .border_color(hex(p.black_side)),
                         );
                     }
                     for (ply, color) in &marks {
@@ -106,7 +123,9 @@ pub fn eval_graph(
                                 Bounds::new(point(center.x - r, center.y - r), size(r * 2., r * 2.)),
                                 *color,
                             )
-                            .corner_radii(r),
+                            .corner_radii(r)
+                            .border_widths(px(1.))
+                            .border_color(hex(p.black_side)),
                         );
                     }
                 },
