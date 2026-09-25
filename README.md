@@ -275,8 +275,8 @@ cargo xtask run --release
 <details>
 <summary>Сборка из исходников</summary>
 
-Нужны Command Line Tools (`xcode-select --install`) и Rust
-(<https://rustup.rs>); Xcode не нужен.
+Нужны Command Line Tools 26 или новее (`xcode-select --install`): графике
+GPUI нужен SDK macOS 26. Ещё нужен Rust (<https://rustup.rs>); Xcode не нужен.
 
 ```sh
 git clone https://github.com/NikitaSytsevich/chess-analyzer

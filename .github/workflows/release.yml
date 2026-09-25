@@ -64,7 +64,10 @@ jobs:
     name: macOS — проверки и сборка
     needs: version
     if: needs.version.outputs.build == 'true'
-    runs-on: macos-15
+    # macOS 26: мост GPUI к Metal (apple-metal) собирается только с SDK
+    # macOS 26 — Xcode 16 на macos-15 его не знает. Готовая программа
+    # по-прежнему запускается на macOS 15.
+    runs-on: macos-26
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
