@@ -1,16 +1,20 @@
 //! Шахматная модель анализатора: партия, нотация, оценки, классификация ходов,
-//! PGN.
+//! точность, PGN.
 //!
 //! Остальные крейты берут шахматные типы отсюда, а не из `shakmaty` напрямую:
 //! так версия правил игры в проекте одна, и сменить её можно в одном месте.
 
+mod accuracy;
 mod assess;
 mod eval;
 mod game;
 mod notation;
 mod pgn;
 
-pub use assess::{Assessment, MoveClass, MoveContext, Thresholds, assess, is_only_move, standout};
+pub use accuracy::{game_accuracy, move_accuracy};
+pub use assess::{
+    Assessment, MoveClass, MoveContext, Thresholds, assess, assess_ending, is_only_move, standout,
+};
 pub use eval::{Score, Wdl, expected_score};
 pub use game::{Ending, Game, IllegalMove, Ply};
 pub use notation::{Notation, format_san, line_text, move_prefix, san_text};

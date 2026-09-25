@@ -1,6 +1,7 @@
 use shakmaty::{Board, Chess, Color, Move, Position, Role};
 
 use crate::eval::{Score, expected_score};
+use crate::game::Ending;
 
 /// Качество сыгранного хода — от лучшего к худшему.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -119,6 +120,38 @@ pub fn assess(
         MoveClass::Good
     };
     Assessment { class, loss, before, after, missed_win: !played_best && was >= 0.85 && now < 0.65 }
+}
+
+/// Ход, которым партия закончилась на доске. Движку здесь считать нечего:
+/// в позиции после хода ходов нет.
+///
+/// - Мат — лучший ход, какой бывает. `before` может быть неизвестна
+///   (движок не успел досчитать позицию до хода) — тогда это мат в один ход.
+/// - Пат и «мало материала для мата» — ничья: позиция после хода стоит
+///   ровно 0.00, и ход оценивается, как любой другой. Пат в выигранной
+///   позиции — зевок и упущенный выигрыш; в проигранной — спасение. Без
+///   оценки позиции до хода судить не по чему — `None`.
+///
+/// `after` у мата — [`Score::Mate(0)`](Score::Mate): мат уже на доске.
+pub fn assess_ending(
+    mover: Color,
+    ending: Ending,
+    before: Option<Score>,
+    played_best: bool,
+    thresholds: &Thresholds,
+) -> Option<Assessment> {
+    match ending {
+        Ending::Checkmate { .. } => Some(Assessment {
+            class: MoveClass::Best,
+            loss: 0.0,
+            before: before.unwrap_or(Score::Mate(1).from_side_to_move(mover)),
+            after: Score::Mate(0),
+            missed_win: false,
+        }),
+        Ending::Stalemate | Ending::InsufficientMaterial => {
+            before.map(|before| assess(mover, before, Score::Cp(0), played_best, thresholds))
+        }
+    }
 }
 
 /// Единственный ход: лучшая линия держит позицию, а вторая уже проигрывает
@@ -262,6 +295,39 @@ mod tests {
         assert_eq!(a.class, MoveClass::Blunder);
         assert!(a.missed_win);
         assert_eq!(a.class.symbol(), Some("??"));
+    }
+
+    #[test]
+    fn mate_on_the_board_is_the_best_move_there_is() {
+        let t = Thresholds::default();
+        let mate = Ending::Checkmate { winner: Color::Black };
+        let a = assess_ending(Color::Black, mate, None, false, &t).unwrap();
+        assert_eq!(a.class, MoveClass::Best);
+        assert_eq!(a.before, Score::Mate(-1), "without an engine it was mate in one");
+        assert_eq!(a.after, Score::Mate(0));
+        // Даже если движок видел мат дольше — поставленный мат лучше любого.
+        let a = assess_ending(
+            Color::White,
+            Ending::Checkmate { winner: Color::White },
+            Some(Score::Mate(4)),
+            false,
+            &t,
+        );
+        assert_eq!(a.unwrap().class, MoveClass::Best);
+    }
+
+    #[test]
+    fn stalemating_a_won_game_is_a_blunder() {
+        let t = Thresholds::default();
+        let a = assess_ending(Color::White, Ending::Stalemate, Some(Score::Cp(900)), false, &t).unwrap();
+        assert_eq!(a.class, MoveClass::Blunder);
+        assert!(a.missed_win);
+        assert_eq!(a.after, Score::Cp(0));
+        // Проигрывающему пат — спасение, а не ошибка.
+        let a = assess_ending(Color::Black, Ending::Stalemate, Some(Score::Cp(900)), true, &t).unwrap();
+        assert_eq!(a.class, MoveClass::Best);
+        // Без оценки позиции до хода судить не по чему.
+        assert_eq!(assess_ending(Color::White, Ending::InsufficientMaterial, None, false, &t), None);
     }
 
     /// «Оперная партия» (Морфи, 1858): позиция перед ходом `ply` (с нуля),
