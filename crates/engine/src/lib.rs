@@ -38,12 +38,15 @@ pub struct EngineOptions {
 }
 
 impl EngineOptions {
-    /// Настройки под M1 с 8 ГБ памяти: четыре производительных ядра движку,
-    /// энергоэффективные — захвату, распознаванию и интерфейсу.
+    /// Движку — половина логических ядер, но не больше восьми: вторая
+    /// половина остаётся захвату, распознаванию и интерфейсу, а браузеру с
+    /// трансляцией — запас. На M1 это четыре производительных ядра. Хеш —
+    /// 256 МБ: впору и машине с 8 ГБ памяти.
     pub fn new(path: impl Into<PathBuf>) -> Self {
+        let cores = std::thread::available_parallelism().map_or(2, usize::from);
         Self {
             path: path.into(),
-            threads: 4,
+            threads: (cores / 2).clamp(1, 8) as u16,
             hash_mb: 256,
             multipv: 3,
             max_depth: 40,
@@ -188,8 +191,9 @@ impl Drop for Engine {
 
 /// Где лежит Stockfish: переменная `STOCKFISH_PATH`, затем рядом с
 /// программой (в `.app` — `Contents/Resources/engines/stockfish`, в папке
-/// Windows — `engines\stockfish.exe`), затем `vendor/` рабочей копии — для
-/// запуска из `cargo run` и тестов.
+/// Windows и Linux — `engines/stockfish`), затем `vendor/` рабочей копии —
+/// для запуска из `cargo run` и тестов, — и наконец Stockfish, установленный
+/// в систему (`PATH`, а на Debian и Ubuntu — `/usr/games`).
 pub fn locate_stockfish() -> Option<PathBuf> {
     if let Some(path) = std::env::var_os("STOCKFISH_PATH").map(PathBuf::from) {
         return Some(path);
@@ -203,7 +207,11 @@ pub fn locate_stockfish() -> Option<PathBuf> {
         )
     });
     let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../vendor/stockfish").join(&file);
-    [bundled, Some(workspace)].into_iter().flatten().find(|path| path.is_file())
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    let system = std::env::split_paths(&path)
+        .chain(cfg!(target_os = "linux").then(|| PathBuf::from("/usr/games")))
+        .map(|dir| dir.join(&file));
+    [bundled, Some(workspace)].into_iter().flatten().chain(system).find(|path| path.is_file())
 }
 
 /// Сколько линий движок пришлёт на каждой глубине: не больше, чем легальных
