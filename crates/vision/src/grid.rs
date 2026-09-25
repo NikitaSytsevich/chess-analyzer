@@ -7,7 +7,6 @@
 //! а не столбцами, — и не сбивают поиск.
 
 use crate::Frame;
-use crate::color::Rgb;
 
 /// Положение доски в пикселях кадра: левый верхний угол и сторона клетки.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -57,6 +56,7 @@ pub fn grid_candidates(frame: &Frame, min_fraction: f32) -> Vec<(Grid, f32)> {
         return Vec::new();
     }
     let (px, py) = gradient_profiles(frame);
+    let (px, py) = (Profile::new(px), Profile::new(py));
     let min_side = width.min(height) as f32;
     let s_min = (min_side * min_fraction / 8.0).max(6.0);
     let s_max = min_side / 8.0;
@@ -83,8 +83,8 @@ pub fn grid_candidates(frame: &Frame, min_fraction: f32) -> Vec<(Grid, f32)> {
         }
         // Уточнение до долей пикселя: настоящие пики возле предсказанных мест
         // и прямая через них методом наименьших квадратов.
-        let (x0, sx) = refine(&px, x0, s);
-        let (y0, sy) = refine(&py, y0, s);
+        let (x0, sx) = refine(&px.raw, x0, s);
+        let (y0, sy) = refine(&py.raw, y0, s);
         if (sx - sy).abs() > 0.04 * sx.max(sy) {
             continue;
         }
@@ -104,37 +104,71 @@ pub fn grid_candidates(frame: &Frame, min_fraction: f32) -> Vec<(Grid, f32)> {
 
 /// Профили градиента: сумма по столбцам и по строкам. Элемент `i` —
 /// граница между пикселями `i` и `i + 1`.
+///
+/// Кадр читается один раз, строка за строкой, — так, как он лежит в памяти:
+/// обход по столбцам на кадре окна браузера в разы медленнее из-за промахов
+/// кэша. Скачок цвета между пикселями — сумма модулей разностей каналов,
+/// `0..=765`, поэтому его вклад в профиль берётся из таблицы.
 fn gradient_profiles(frame: &Frame) -> (Vec<f32>, Vec<f32>) {
     let width = frame.width() as usize;
     let height = frame.height() as usize;
     let data = frame.bgra();
-    let at = |x: usize, y: usize| Rgb::from_bgra(&data[(y * width + x) * 4..]);
-    let step = |a: Rgb, b: Rgb| (a.distance(b) - GRADIENT_NOISE).max(0.0);
+    // Та же величина, что `(Rgb::distance − GRADIENT_NOISE).max(0)`, для
+    // каждой возможной суммы разностей каналов.
+    let steps: [f32; 766] = std::array::from_fn(|sum| (sum as f32 / 3.0 - GRADIENT_NOISE).max(0.0));
+    let step = |a: &[u8], b: &[u8]| {
+        steps[usize::from(a[0].abs_diff(b[0]))
+            + usize::from(a[1].abs_diff(b[1]))
+            + usize::from(a[2].abs_diff(b[2]))]
+    };
     let mut px = vec![0.0; width - 1];
     let mut py = vec![0.0; height - 1];
-    for (x, total) in px.iter_mut().enumerate() {
-        *total = (0..height).map(|y| step(at(x, y), at(x + 1, y))).sum();
-    }
-    for (y, total) in py.iter_mut().enumerate() {
-        *total = (0..width).map(|x| step(at(x, y), at(x, y + 1))).sum();
+    let rows: Vec<&[[u8; 4]]> = data.as_chunks::<4>().0.chunks_exact(width).collect();
+    for (y, row) in rows.iter().enumerate() {
+        for (total, pair) in px.iter_mut().zip(row.windows(2)) {
+            *total += step(&pair[0], &pair[1]);
+        }
+        if let Some(below) = rows.get(y + 1) {
+            py[y] = row.iter().zip(below.iter()).map(|(a, b)| step(a, b)).sum();
+        }
     }
     (px, py)
 }
 
-/// Значение профиля у края `edge` (в координатах краёв пикселей): максимум
-/// по соседям — сглаживание краёв клеток размазывает пик на пару пикселей.
-fn peak(profile: &[f32], edge: f32) -> f32 {
-    let index = edge.round() as isize - 1;
-    (index - 1..=index + 1)
-        .filter_map(|i| usize::try_from(i).ok().and_then(|i| profile.get(i)))
-        .fold(0.0, |acc: f32, v| acc.max(*v))
+/// Профиль градиента и его пики у каждого края.
+struct Profile {
+    /// Элемент `i` — граница между пикселями `i` и `i + 1`, то есть край `i + 1`.
+    raw: Vec<f32>,
+    /// Элемент `e` — пик у края `e`: максимум профиля по этому краю и двум
+    /// соседним. Сглаживание краёв клеток размазывает пик на пару пикселей.
+    /// Считается один раз, а не для каждого из сотен перебираемых положений
+    /// сетки.
+    peaks: Vec<f32>,
+}
+
+impl Profile {
+    fn new(raw: Vec<f32>) -> Self {
+        let len = raw.len();
+        // Края от 0 до `len + 1`: у крайних часть соседей за кадром.
+        let peaks = (0..len + 2)
+            .map(|edge| {
+                raw[edge.saturating_sub(2)..(edge + 1).min(len)].iter().fold(0.0, |a: f32, &v| a.max(v))
+            })
+            .collect();
+        Self { raw, peaks }
+    }
+
+    /// Пик у края `edge` (в координатах краёв пикселей); за кадром — ноль.
+    fn peak(&self, edge: f32) -> f32 {
+        usize::try_from(edge.round() as isize).ok().and_then(|e| self.peaks.get(e)).copied().unwrap_or(0.0)
+    }
 }
 
 /// Лучшие сдвиги сетки с шагом `s`: семь внутренних границ весят полностью,
 /// два края доски — меньше, у них с одной стороны фон страницы, а не клетка.
 /// Сдвиги ближе полуклетки друг к другу — один и тот же кандидат.
-fn best_offsets(profile: &[f32], s: f32, count: usize) -> Vec<(f32, f32)> {
-    let len = profile.len() as f32 + 1.0;
+fn best_offsets(profile: &Profile, s: f32, count: usize) -> Vec<(f32, f32)> {
+    let len = profile.raw.len() as f32 + 1.0;
     let last = len - 8.0 * s;
     if last < 0.0 {
         return Vec::new();
@@ -145,14 +179,14 @@ fn best_offsets(profile: &[f32], s: f32, count: usize) -> Vec<(f32, f32)> {
         // Каждая внутренняя линия весит не больше полутора медиан семи: иначе
         // одна яркая граница (край доски на тёмной странице) перевешивает
         // шесть настоящих и тянет сетку на клетку в сторону.
-        let mut inner: [f32; 7] = std::array::from_fn(|k| peak(profile, x0 + (k + 1) as f32 * s));
+        let mut inner: [f32; 7] = std::array::from_fn(|k| profile.peak(x0 + (k + 1) as f32 * s));
         let mut sorted = inner;
         sorted.sort_by(f32::total_cmp);
         let cap = sorted[3] * 1.5;
         for value in &mut inner {
             *value = value.min(cap);
         }
-        let outer = peak(profile, x0) + peak(profile, x0 + 8.0 * s);
+        let outer = profile.peak(x0) + profile.peak(x0 + 8.0 * s);
         scored.push((x0, inner.iter().sum::<f32>() + 0.35 * outer));
         x0 += 1.0;
     }
@@ -207,13 +241,13 @@ fn refine(profile: &[f32], x0: f32, s: f32) -> (f32, f32) {
 }
 
 /// Во сколько раз границы клеток ярче среднего уровня профиля на доске.
-fn contrast(profile: &[f32], x0: f32, s: f32) -> f32 {
+fn contrast(profile: &Profile, x0: f32, s: f32) -> f32 {
     let start = x0.max(0.0) as usize;
-    let end = ((x0 + 8.0 * s) as usize).min(profile.len());
+    let end = ((x0 + 8.0 * s) as usize).min(profile.raw.len());
     if end <= start {
         return 0.0;
     }
-    let mean = profile[start..end].iter().sum::<f32>() / (end - start) as f32;
-    let peaks = (1..8).map(|k| peak(profile, x0 + k as f32 * s)).sum::<f32>() / 7.0;
+    let mean = profile.raw[start..end].iter().sum::<f32>() / (end - start) as f32;
+    let peaks = (1..8).map(|k| profile.peak(x0 + k as f32 * s)).sum::<f32>() / 7.0;
     if mean <= f32::EPSILON { 0.0 } else { peaks / mean }
 }
