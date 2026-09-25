@@ -14,8 +14,10 @@ use windows::Win32::UI::WindowsAndMessaging::{
     SetWindowPos, WS_EX_TOPMOST,
 };
 
-/// Моноширинный шрифт цифр: есть в каждой Windows начиная с Vista.
+/// Моноширинный шрифт — для клавиш в подсказках: есть в каждой Windows начиная с Vista.
 pub const MONO_FONT: &str = "Consolas";
+/// Антиква заголовков: Georgia есть в каждой системе и с кириллицей.
+pub const SERIF_FONT: &str = "Georgia";
 /// Приписка модификатора в подсказках клавиш: «Ctrl+O».
 pub const COMMAND: &str = "Ctrl+";
 pub const PINNED_NOTICE: &str = "Окно поверх всех окон";

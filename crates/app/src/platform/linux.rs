@@ -12,9 +12,12 @@ use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use x11rb::connection::Connection as _;
 use x11rb::protocol::xproto::{AtomEnum, ClientMessageEvent, ConnectionExt as _, EventMask};
 
-/// Моноширинный шрифт цифр: DejaVu есть почти в каждом дистрибутиве, а где
-/// его нет, fontconfig подставит ближайший моноширинный.
+/// Моноширинный шрифт — для клавиш в подсказках: DejaVu есть почти в каждом
+/// дистрибутиве, а где его нет, fontconfig подставит ближайший моноширинный.
 pub const MONO_FONT: &str = "DejaVu Sans Mono";
+/// Антиква заголовков. Georgia на Linux обычно нет, а Noto Serif с
+/// кириллицей стоит в Ubuntu, Fedora и большинстве остальных дистрибутивов.
+pub const SERIF_FONT: &str = "Noto Serif";
 /// Приписка модификатора в подсказках клавиш: «Ctrl+O».
 pub const COMMAND: &str = "Ctrl+";
 pub const PINNED_NOTICE: &str = "Окно поверх всех окон";

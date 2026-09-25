@@ -11,8 +11,10 @@ use objc2::rc::Retained;
 use objc2_app_kit::{NSFloatingWindowLevel, NSView, NSWindow, NSWindowCollectionBehavior, NSWindowLevel};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
-/// Моноширинный шрифт цифр.
+/// Моноширинный шрифт — для клавиш в подсказках.
 pub const MONO_FONT: &str = "Menlo";
+/// Антиква заголовков: Georgia есть в каждой системе и с кириллицей.
+pub const SERIF_FONT: &str = "Georgia";
 /// Приписка модификатора в подсказках клавиш: «⌘O».
 pub const COMMAND: &str = "⌘";
 pub const PINNED_NOTICE: &str = "Окно поверх всех окон и на всех рабочих столах";

@@ -40,11 +40,13 @@ fn main() {
     // иконки не рисуются.
     gpui_kit::application().with_assets(AppAssets).run(move |cx| {
         gpui_kit::init(cx);
-        theme::apply(cx);
+        theme::apply(theme::is_dark(cx.window_appearance()), cx);
         cx.bind_keys(workspace::key_bindings());
         let options = WindowOptions {
-            window_bounds: Some(WindowBounds::centered(size(px(1280.), px(820.)), cx)),
-            // Узкое окно — доска со шкалой рядом с трансляцией, панель прячется сама.
+            // Окно — впритык к доске со шкалой, подписью и графиком: рядом
+            // остаётся место для трансляции.
+            window_bounds: Some(WindowBounds::centered(workspace::window_size(560., true), cx)),
+            // Совсем узкое окно — доска со шкалой, подпись и график прячутся сами.
             window_min_size: Some(size(px(340.), px(400.))),
             // Linux: заголовок рисуем сами, как на macOS и Windows, — с
             // индикаторами и кнопками. Где оконный менеджер этого не умеет,
@@ -56,10 +58,12 @@ fn main() {
         };
         cx.open_window(options, move |window, cx| {
             window.set_window_title("Шахматный анализатор");
+            // У окна оформление точнее, чем у приложения (на Linux — только у окна).
+            theme::apply(theme::is_dark(window.appearance()), cx);
             let view = cx.new(|cx| {
                 let mut workspace = Workspace::new(window, cx);
                 if demo {
-                    workspace.start_demo(cx);
+                    workspace.start_demo(window, cx);
                 }
                 workspace
             });
