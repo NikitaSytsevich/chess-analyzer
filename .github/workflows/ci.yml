@@ -1,5 +1,6 @@
 # Проверки и сборка под Windows и Linux. macOS проверяется на машине
-# разработки (`cargo xtask ci`): минуты macOS в Actions в десять раз дороже.
+# разработки (`cargo xtask ci`) и при выпуске (release.yml): минуты macOS в
+# Actions в десять раз дороже.
 name: CI
 
 on:
@@ -7,6 +8,8 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
+  # Выпуск (release.yml) собирает Windows и Linux этими же задачами.
+  workflow_call:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}

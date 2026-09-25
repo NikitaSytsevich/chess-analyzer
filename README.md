@@ -10,6 +10,9 @@
 подсказывает оценку Stockfish 19, лучшие продолжения, ошибки и находки —<br>
 вам, а не зрителям.
 
+**[Скачать для Windows, Linux и macOS](https://github.com/NikitaSytsevich/chess-analyzer/releases/latest)**
+
+[![Релиз](https://img.shields.io/github/v/release/NikitaSytsevich/chess-analyzer?label=релиз&color=D97757)](https://github.com/NikitaSytsevich/chess-analyzer/releases/latest)
 [![CI](https://github.com/NikitaSytsevich/chess-analyzer/actions/workflows/ci.yml/badge.svg)](https://github.com/NikitaSytsevich/chess-analyzer/actions/workflows/ci.yml)
 ![macOS](https://img.shields.io/badge/macOS-15%2B-3D3D3A)
 ![Windows](https://img.shields.io/badge/Windows-10%20·%2011-3D3D3A)
@@ -164,7 +167,7 @@ flowchart LR
 |---|---|---|
 | Windows 10 (1903+) и 11 | готовая или из исходников | системный выбор окна (Windows.Graphics.Capture) |
 | Linux, X11 и Wayland | готовая или из исходников | системный выбор через портал рабочего стола (GNOME, KDE); без портала — щелчок по окну |
-| macOS 15+, Apple Silicon | из исходников | системный выбор окна (ScreenCaptureKit), без разрешения «Запись экрана» |
+| macOS 15+, Apple Silicon | готовая или из исходников | системный выбор окна (ScreenCaptureKit), без разрешения «Запись экрана» |
 
 Stockfish 19 входит в каждую сборку. Без трансляции программу можно
 посмотреть на демо-партии: кнопка «Посмотреть на демо-партии» на первом
@@ -172,8 +175,8 @@ Stockfish 19 входит в каждую сборку. Без трансляц�
 
 ### Windows
 
-**Готовая сборка:** вкладка **Actions** → последний запуск **CI** →
-артефакт **chess-analyzer-windows-x64**. Распакуйте папку куда угодно и
+**Готовая сборка:** [страница релизов](https://github.com/NikitaSytsevich/chess-analyzer/releases/latest) →
+`chess-analyzer-windows-x64.zip`. Распакуйте архив куда угодно и
 запустите `Шахматный анализатор.exe`. Сборка не подписана, поэтому при
 первом запуске Windows может показать «Windows защитила ваш компьютер» —
 нажмите «Подробнее» → «Выполнить в любом случае».
@@ -208,8 +211,8 @@ Stockfish 19 входит в каждую сборку. Без трансляц�
 
 ### Linux
 
-**Готовая сборка:** вкладка **Actions** → последний запуск **CI** →
-артефакт **chess-analyzer-linux-x64**. Внутри — архив с папкой программы:
+**Готовая сборка:** [страница релизов](https://github.com/NikitaSytsevich/chess-analyzer/releases/latest) →
+`chess-analyzer-linux-x64.tar.gz`:
 
 ```sh
 tar -xzf chess-analyzer-linux-x64.tar.gz
@@ -259,6 +262,19 @@ cargo xtask run --release
 
 ### macOS
 
+**Готовая сборка:** [страница релизов](https://github.com/NikitaSytsevich/chess-analyzer/releases/latest) →
+`chess-analyzer-macos-arm64.dmg`. Откройте образ и перетащите программу в
+«Программы». Сборка не заверена Apple, поэтому в первый раз macOS её не
+откроет: зайдите в «Системные настройки» → «Конфиденциальность и
+безопасность» и разрешите открыть «Шахматный анализатор» кнопкой внизу
+раздела.
+
+Окно трансляции выбирается в системном окне macOS — разрешение «Запись
+экрана» не понадобится.
+
+<details>
+<summary>Сборка из исходников</summary>
+
 Нужны Command Line Tools (`xcode-select --install`) и Rust
 (<https://rustup.rs>); Xcode не нужен.
 
@@ -269,8 +285,9 @@ cargo xtask run
 ```
 
 Команда скачает Stockfish, соберёт «Шахматный анализатор.app» в `target/`
-и запустит его. Окно трансляции выбирается в системном окне macOS —
-разрешение «Запись экрана» не понадобится.
+и запустит его.
+
+</details>
 
 ## Как пользоваться
 
@@ -327,6 +344,10 @@ xtask/      загрузка Stockfish, иконки, упаковка прил�
 трансляции. Перед коммитом: `cargo xtask ci` (rustfmt, clippy без
 предупреждений, тесты). Проверки с настоящим Stockfish:
 `cargo test -- --ignored` после `cargo xtask fetch-stockfish`.
+
+Выпуск версии — это новая `version` в `Cargo.toml`. Когда она попадает в
+`main`, Actions проверяют и собирают программу для Windows, Linux и macOS
+и публикуют релиз `v<версия>` с готовыми файлами.
 
 ## Лицензия
 
