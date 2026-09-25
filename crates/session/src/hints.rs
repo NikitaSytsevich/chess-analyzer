@@ -3,7 +3,7 @@
 
 use analyzer_chess::{
     Assessment, Chess, Color, Move, MoveClass, Notation, Position, Role, Score, expected_score, line_text,
-    move_prefix, san_text,
+    move_prefix, sacrificed_piece, san_text,
 };
 
 /// Вид подсказки — для значка и цвета в интерфейсе.
@@ -72,7 +72,8 @@ pub(crate) fn error_hint(
 }
 
 /// «16.Фb8+!! — блестящий ход: жертва ферзя ради мата», «7.Сc4! — сильный
-/// ход: единственный, и он найден».
+/// ход: единственный, и он найден». Жертвуют не обязательно сходившей
+/// фигурой: 5.Кxe5!! в мате Легаля отдаёт ферзя.
 pub(crate) fn standout_hint(
     ply: usize,
     before: &Chess,
@@ -83,7 +84,7 @@ pub(crate) fn standout_hint(
 ) -> Option<Hint> {
     let (kind, detail) = match class {
         MoveClass::Brilliant => {
-            let piece = match played.role() {
+            let piece = match sacrificed_piece(before, played) {
                 Role::Queen => "ферзя",
                 Role::Rook => "ладьи",
                 Role::Bishop => "слона",

@@ -13,7 +13,8 @@ mod pgn;
 
 pub use accuracy::{game_accuracy, move_accuracy};
 pub use assess::{
-    Assessment, MoveClass, MoveContext, Thresholds, assess, assess_ending, is_only_move, standout,
+    Assessment, MoveClass, MoveContext, Thresholds, assess, assess_ending, is_only_move, sacrificed_piece,
+    standout,
 };
 pub use eval::{Score, Wdl, expected_score};
 pub use game::{Ending, Game, IllegalMove, Ply};
