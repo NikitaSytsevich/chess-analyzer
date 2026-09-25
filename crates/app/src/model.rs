@@ -6,7 +6,8 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 
 use analyzer_chess::{
-    Assessment, CastlingMode, Color, Ending, Game, Move, MoveClass, Notation, Score, Square, UciMove,
+    Assessment, CastlingMode, Color, Ending, Game, Move, MoveClass, Notation, Position, Score, Square,
+    UciMove, game_accuracy, move_accuracy,
 };
 use analyzer_engine::AnalysisUpdate;
 use analyzer_session::{Event, GameEvent, Hint, RecognitionStatus};
@@ -107,6 +108,22 @@ impl Model {
             UciMove::Normal { from, to, .. } => Some((from, to)),
             _ => None,
         }
+    }
+
+    /// Точность стороны `color` за партию, в процентах (см.
+    /// `analyzer_chess::game_accuracy`) — по оценённым ходам. Лучший ход и
+    /// выдающиеся — 100%, даже если на большей глубине движок передумал:
+    /// значок на доске и точность не должны спорить.
+    pub fn accuracy(&self, color: Color) -> Option<f32> {
+        let game = self.game.as_ref()?;
+        let moves = self.assessments.iter().filter_map(|(&ply, (assessment, _))| {
+            let mover = game.position(ply.checked_sub(1).filter(|&before| before < game.len())?).turn();
+            (mover == color).then(|| match assessment.class {
+                MoveClass::Brilliant | MoveClass::Great | MoveClass::Best => 100.0,
+                _ => move_accuracy(assessment.loss),
+            })
+        });
+        game_accuracy(moves)
     }
 
     /// Класс последнего хода для значка на доске: номер полухода, клетка,
@@ -221,6 +238,25 @@ mod tests {
         let (mv, san) = (three.plies()[2].mv, three.plies()[2].san);
         model.apply(Event::Game { game: three, change: GameEvent::Moved { ply: 3, mv, san } });
         assert_eq!(model.last_badge(), None);
+    }
+
+    #[test]
+    fn accuracy_is_counted_for_each_side() {
+        let mut model = Model::default();
+        let two = game(&["e2e4", "e7e5"]);
+        let (mv, san) = (two.plies()[1].mv, two.plies()[1].san);
+        model.apply(Event::Game { game: two, change: GameEvent::Moved { ply: 2, mv, san } });
+        assert_eq!(model.accuracy(Color::White), None, "nothing is assessed yet");
+        let thresholds = analyzer_chess::Thresholds::default();
+        let best = analyzer_chess::assess(Color::White, Score::Cp(20), Score::Cp(-60), true, &thresholds);
+        let mistake = analyzer_chess::assess(Color::Black, Score::Cp(20), Score::Cp(140), false, &thresholds);
+        assert_eq!(mistake.class, MoveClass::Mistake);
+        model.apply(Event::Assessment { ply: 1, assessment: best, best: None, final_: true });
+        model.apply(Event::Assessment { ply: 2, assessment: mistake, best: None, final_: true });
+        // Первый ход движка — 100%, хоть оценка после него и просела.
+        assert_eq!(model.accuracy(Color::White), Some(100.0));
+        let black = model.accuracy(Color::Black).unwrap();
+        assert!(black > 60.0 && black < 80.0, "{black}");
     }
 
     #[test]

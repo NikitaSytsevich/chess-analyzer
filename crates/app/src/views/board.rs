@@ -8,10 +8,9 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use analyzer_chess::{Bitboard, Board, File, MoveClass, Rank, Square};
-use gpui_kit::assets::IconName;
-use gpui_kit::component::Icon;
 use gpui_kit::*;
 
+use crate::assets::class_icon;
 use crate::pieces::PieceImages;
 use crate::theme::{self, hex, hexa};
 
@@ -163,6 +162,9 @@ fn last_move_tint(badge: Option<Badge>, square: Square) -> AnyElement {
 /// Значок класса хода в правом верхнем углу клетки, куда пошла фигура, и
 /// волны вокруг него. `side` — сторона доски в точках; до первой раскладки
 /// она неизвестна, и значка нет.
+///
+/// Знак внутри — векторный (см. `assets`): звезда, галочка и `?!` одного
+/// веса и ровно по центру кружка при любом его размере.
 fn badge_views(badge: Badge, side: f32, white_bottom: bool) -> Vec<AnyElement> {
     if side <= 0.0 {
         return Vec::new();
@@ -203,15 +205,7 @@ fn badge_views(badge: Badge, side: f32, white_bottom: bool) -> Vec<AnyElement> {
         );
     }
 
-    // Галочка — значок, остальное — знаки текстом.
-    let glyph = match badge.class {
-        // Звезда — залитая, как на Chess.com: контур Lucide на кружке теряется.
-        MoveClass::Best => div().child("★").into_any_element(),
-        MoveClass::Good => Icon::new(IconName::Check).w(relative(0.62)).h(relative(0.62)).into_any_element(),
-        class => div().child(class.symbol().unwrap_or_default()).into_any_element(),
-    };
-    // Два знака («!!», «?!», «??») мельче одного.
-    let text = if badge.class.symbol().is_some_and(|symbol| symbol.len() > 1) { 0.44 } else { 0.58 };
+    let glyph = svg().path(class_icon(badge.class)).w(relative(0.66)).h(relative(0.66)).text_color(white());
     let mut shadows = vec![BoxShadow {
         color: hsla(0.0, 0.0, 0.0, 0.35),
         offset: point(px(0.0), px(1.5)),
@@ -238,9 +232,6 @@ fn badge_views(badge: Badge, side: f32, white_bottom: bool) -> Vec<AnyElement> {
         .border_2()
         .border_color(hexa(0xFFFFFFE0))
         .shadow(shadows)
-        .text_color(hex(0xFFFFFF))
-        .font_weight(FontWeight::EXTRA_BOLD)
-        .line_height(relative(1.0))
         .child(glyph);
     let mut animations = vec![Animation::new(POP).with_easing(back_out)];
     if badge.class == MoveClass::Blunder {
@@ -257,7 +248,6 @@ fn badge_views(badge: Badge, side: f32, white_bottom: bool) -> Vec<AnyElement> {
             this.size(px(size))
                 .left(px(cx - size / 2.0 + dx))
                 .top(px(cy - size / 2.0))
-                .text_size(px(size * text))
                 .opacity((scale * 3.0).min(1.0))
         })
         .into_any_element(),

@@ -1,9 +1,9 @@
 //! График оценки по полуходам: над серединой — перевес белых, под ней —
-//! чёрных; ошибки отмечены точками своего цвета.
+//! чёрных; ошибки, блестящие и сильные ходы отмечены точками своего цвета.
 
 use std::collections::HashMap;
 
-use analyzer_chess::{Assessment, Move, MoveClass, Score};
+use analyzer_chess::{Assessment, Color, Ending, Move, MoveClass, Score};
 use gpui_kit::*;
 
 use crate::model::white_share;
@@ -12,11 +12,12 @@ use crate::theme::{self, class_color, hex};
 pub fn eval_graph(
     evals: &[Option<Score>],
     assessments: &HashMap<usize, (Assessment, Option<Move>)>,
+    ending: Option<Ending>,
 ) -> impl IntoElement {
     // Пропуски (позиции, которые движок не успел оценить) заполняем
     // предыдущей оценкой: линия не рвётся на быстрых ходах.
     let mut last = 0.5;
-    let shares: Vec<f32> = evals
+    let mut shares: Vec<f32> = evals
         .iter()
         .map(|score| {
             if let Some(score) = score {
@@ -25,9 +26,20 @@ pub fn eval_graph(
             last
         })
         .collect();
+    // Партия кончилась на доске: последняя точка — её итог. Мат движок не
+    // оценивает — в позиции нет ходов.
+    if let (Some(ending), Some(end)) = (ending, shares.last_mut()) {
+        *end = match ending.winner() {
+            Some(Color::White) => 1.0,
+            Some(Color::Black) => 0.0,
+            None => 0.5,
+        };
+    }
     let marks: Vec<(usize, Hsla)> = assessments
         .iter()
-        .filter(|(_, (a, _))| a.class >= MoveClass::Inaccuracy)
+        .filter(|(_, (a, _))| {
+            matches!(a.class, MoveClass::Brilliant | MoveClass::Great) || a.class >= MoveClass::Inaccuracy
+        })
         .map(|(ply, (a, _))| (*ply, class_color(a.class)))
         .collect();
 

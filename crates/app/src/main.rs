@@ -6,6 +6,7 @@
 // Выпускная сборка на Windows — оконная программа: без окна консоли рядом.
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
+mod assets;
 mod model;
 mod pieces;
 mod platform;
@@ -16,6 +17,7 @@ mod workspace;
 use gpui_kit::component::{Root, TitleBar};
 use gpui_kit::*;
 
+use crate::assets::AppAssets;
 use crate::workspace::Workspace;
 
 fn main() {
@@ -29,8 +31,9 @@ fn main() {
     // проверить изменения интерфейса) без трансляции и без лишних кликов.
     let demo = std::env::args().any(|arg| arg == "--demo");
 
-    // Полный каталог иконок Lucide: без источника ресурсов иконки не рисуются.
-    gpui_kit::application().with_assets(gpui_kit::assets::AllAssets).run(move |cx| {
+    // Свои значки и полный каталог иконок Lucide: без источника ресурсов
+    // иконки не рисуются.
+    gpui_kit::application().with_assets(AppAssets).run(move |cx| {
         gpui_kit::init(cx);
         theme::apply(cx);
         cx.bind_keys(workspace::key_bindings());

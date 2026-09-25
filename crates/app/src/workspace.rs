@@ -82,6 +82,9 @@ const PANEL_MIN: f32 = 300.0;
 const MIN_SIDE: f32 = 240.0;
 /// Высота заголовка окна (`TitleBar` из gpui-component).
 const TITLE: f32 = 34.0;
+/// Постоянная времени шкалы оценки, секунды: за это время она проходит
+/// около двух третей пути до новой оценки.
+const BAR_EASE: f32 = 0.1;
 /// Уже или ниже этого панель не помещается рядом с доской и прячется сама.
 /// Высота — заголовок, оценка, три линии, одна подсказка и несколько ходов.
 const FULL_MIN_WIDTH: f32 = PAD + MIN_SIDE + BAR + GAP + PAD + PANEL_MIN + PAD;
@@ -147,8 +150,9 @@ pub struct Workspace {
     wide_width: Option<Pixels>,
     /// Окно закреплено поверх всех окон; внутри — каким оно было до этого.
     pinned: Option<Unpinned>,
-    /// Шкала оценки, сглаженная анимацией.
+    /// Шкала оценки, сглаженная анимацией, и когда её сдвигали в последний раз.
     bar: f32,
+    bar_moved: Instant,
     capture_fps: f32,
     frames_seen: u64,
     notice: Option<SharedString>,
@@ -194,7 +198,9 @@ impl Workspace {
             }
             None => {
                 notice = Some(
-                    "Stockfish не найден: выполните `cargo xtask fetch-stockfish` и пересоберите".into(),
+                    "Stockfish не найден: положите его в папку engines рядом с программой, \
+                     установите в систему или выполните `cargo xtask fetch-stockfish`"
+                        .into(),
                 );
                 None
             }
@@ -255,6 +261,7 @@ impl Workspace {
             wide_width: None,
             pinned: None,
             bar: 0.5,
+            bar_moved: Instant::now(),
             capture_fps: 0.0,
             frames_seen: 0,
             notice,
@@ -988,10 +995,15 @@ impl Workspace {
 
     fn live(&mut self, compact: bool, window: &mut Window) -> impl IntoElement {
         // Шкала догоняет оценку плавно: быстрые колебания на малых глубинах
-        // не дёргают её, а крупная смена оценки видна как движение.
+        // не дёргают её, а крупная смена оценки видна как движение. Скорость
+        // — по времени, а не по кадрам: на экране 120 Гц шкала едет так же,
+        // как на 60 Гц. После простоя первый шаг — как один кадр.
         let target = self.model.bar_target();
+        let now = Instant::now();
+        let step = now.duration_since(self.bar_moved).as_secs_f32().min(1.0 / 30.0);
+        self.bar_moved = now;
         if (target - self.bar).abs() > 0.001 {
-            self.bar += (target - self.bar) * 0.16;
+            self.bar += (target - self.bar) * (1.0 - (-step / BAR_EASE).exp());
             window.request_animation_frame();
         }
         let white_bottom = self.white_bottom();
@@ -1081,7 +1093,11 @@ impl Workspace {
                                     .child(div().size(px(side)).child(board_view)),
                             )
                             .when(!compact, |this| {
-                                this.child(eval_graph(&self.model.evals, &self.model.assessments))
+                                this.child(eval_graph(
+                                    &self.model.evals,
+                                    &self.model.assessments,
+                                    self.model.ending(),
+                                ))
                             }),
                     ),
             )
@@ -1107,6 +1123,7 @@ impl Workspace {
             .child(moves_card(
                 self.model.game.as_deref(),
                 &self.model.assessments,
+                [self.model.accuracy(Color::White), self.model.accuracy(Color::Black)],
                 self.model.notation,
                 &self.moves_scroll,
             ))
