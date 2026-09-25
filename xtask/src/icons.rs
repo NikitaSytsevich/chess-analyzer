@@ -1,7 +1,12 @@
 //! Иконка приложения: из `assets/icon/icon.svg` — `icon.ico` для Windows (её
-//! вшивает в программу `crates/app/build.rs`) и `AppIcon.icns` для macOS (её
-//! кладёт в `.app` упаковка). Готовые файлы лежат в репозитории: сборке
-//! ничего рисовать не нужно, а после правки SVG хватает `cargo xtask icons`.
+//! вшивает в программу `crates/app/build.rs`), `AppIcon.icns` для macOS (её
+//! кладёт в `.app` упаковка) и `icon.png` для Linux (иконка окна на X11 и
+//! ярлыка `.desktop`). Готовые файлы лежат в репозитории: сборке ничего
+//! рисовать не нужно, а после правки SVG хватает `cargo xtask icons`.
+//!
+//! Размеры до 32 пикселей рисуются из `icon-small.svg`: конь там крупнее, а
+//! шкала толще — в полной иконке на 16 пикселях они сливаются в пятно и
+//! линию в пиксель.
 
 use std::fs;
 use std::path::Path;
@@ -18,6 +23,11 @@ const PLATE: Square = Square { offset: 100.0, side: 824.0 };
 /// Размеры в `.ico` — всё, что Windows показывает от панели задач до
 /// крупных значков, при любом масштабе экрана.
 const ICO_SIZES: [u32; 8] = [16, 20, 24, 32, 40, 48, 64, 256];
+/// Сторона `icon.png` для Linux: 256 — самый крупный размер темы иконок
+/// `hicolor`, который используют панели задач и меню приложений.
+const PNG_SIZE: u32 = 256;
+/// До этой стороны включительно иконка рисуется из `icon-small.svg`.
+const SMALL: u32 = 32;
 
 /// Записи `.icns`: тип и сторона в пикселях. Каждый размер — и обычный, и
 /// вдвое больший для Retina.
@@ -42,17 +52,32 @@ struct Square {
 }
 
 pub fn icons(dir: &Path) -> Result<()> {
-    let svg = fs::read_to_string(dir.join("icon.svg")).context("нет assets/icon/icon.svg")?;
-    let tree = usvg::Tree::from_str(&svg, &usvg::Options::default())?;
+    let full = load(&dir.join("icon.svg"))?;
+    let small = load(&dir.join("icon-small.svg"))?;
+    let tree = |size: u32| if size <= SMALL { &small } else { &full };
 
-    let images = ICO_SIZES.iter().map(|&size| Ok((size, render(&tree, size, PLATE)?)));
+    let images = ICO_SIZES.iter().map(|&size| Ok((size, render(tree(size), size, PLATE)?)));
     fs::write(dir.join("icon.ico"), ico(&images.collect::<Result<Vec<_>>>()?))?;
 
-    let images = ICNS_ENTRIES.iter().map(|&(kind, size)| Ok((*kind, render(&tree, size, CANVAS)?)));
+    // На macOS мелкие размеры — тоже без полей: в списках и меню Finder
+    // рисует иконку крошечной, и поля под тень только отнимали бы место.
+    let images = ICNS_ENTRIES.iter().map(|&(kind, size)| {
+        let area = if size <= SMALL { PLATE } else { CANVAS };
+        Ok((*kind, render(tree(size), size, area)?))
+    });
     fs::write(dir.join("AppIcon.icns"), icns(&images.collect::<Result<Vec<_>>>()?))?;
 
-    println!("{}\n{}", dir.join("icon.ico").display(), dir.join("AppIcon.icns").display());
+    fs::write(dir.join("icon.png"), render(&full, PNG_SIZE, PLATE)?)?;
+
+    for file in ["icon.ico", "AppIcon.icns", "icon.png"] {
+        println!("{}", dir.join(file).display());
+    }
     Ok(())
+}
+
+fn load(path: &Path) -> Result<usvg::Tree> {
+    let svg = fs::read_to_string(path).with_context(|| format!("нет {}", path.display()))?;
+    Ok(usvg::Tree::from_str(&svg, &usvg::Options::default())?)
 }
 
 /// Квадрат `area` из SVG — в PNG `size × size`.
@@ -134,11 +159,13 @@ mod tests {
 
     #[test]
     fn the_icon_renders_at_every_size() {
-        let svg = fs::read_to_string(crate::root().join("assets/icon/icon.svg")).unwrap();
-        let tree = usvg::Tree::from_str(&svg, &usvg::Options::default()).unwrap();
-        for size in ICO_SIZES {
-            let png = render(&tree, size, PLATE).unwrap();
-            assert_eq!(&png[1..4], b"PNG");
+        let dir = crate::root().join("assets/icon");
+        for (file, sizes) in [("icon.svg", &ICO_SIZES[..]), ("icon-small.svg", &[16, 32][..])] {
+            let tree = load(&dir.join(file)).unwrap();
+            for &size in sizes {
+                let png = render(&tree, size, PLATE).unwrap();
+                assert_eq!(&png[1..4], b"PNG", "{file} {size}");
+            }
         }
     }
 }

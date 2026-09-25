@@ -1,6 +1,7 @@
-use shakmaty::{Board, Chess, Color, Move, Position, Role};
+use shakmaty::{Bitboard, Board, Chess, Color, Move, Position, Role};
 
 use crate::eval::{Score, expected_score};
+use crate::game::Ending;
 
 /// Качество сыгранного хода — от лучшего к худшему.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -121,6 +122,38 @@ pub fn assess(
     Assessment { class, loss, before, after, missed_win: !played_best && was >= 0.85 && now < 0.65 }
 }
 
+/// Ход, которым партия закончилась на доске. Движку здесь считать нечего:
+/// в позиции после хода ходов нет.
+///
+/// - Мат — лучший ход, какой бывает. `before` может быть неизвестна
+///   (движок не успел досчитать позицию до хода) — тогда это мат в один ход.
+/// - Пат и «мало материала для мата» — ничья: позиция после хода стоит
+///   ровно 0.00, и ход оценивается, как любой другой. Пат в выигранной
+///   позиции — зевок и упущенный выигрыш; в проигранной — спасение. Без
+///   оценки позиции до хода судить не по чему — `None`.
+///
+/// `after` у мата — [`Score::Mate(0)`](Score::Mate): мат уже на доске.
+pub fn assess_ending(
+    mover: Color,
+    ending: Ending,
+    before: Option<Score>,
+    played_best: bool,
+    thresholds: &Thresholds,
+) -> Option<Assessment> {
+    match ending {
+        Ending::Checkmate { .. } => Some(Assessment {
+            class: MoveClass::Best,
+            loss: 0.0,
+            before: before.unwrap_or(Score::Mate(1).from_side_to_move(mover)),
+            after: Score::Mate(0),
+            missed_win: false,
+        }),
+        Ending::Stalemate | Ending::InsufficientMaterial => {
+            before.map(|before| assess(mover, before, Score::Cp(0), played_best, thresholds))
+        }
+    }
+}
+
 /// Единственный ход: лучшая линия держит позицию, а вторая уже проигрывает
 /// столько, что была бы зевком. В безнадёжной позиции «единственного хода»
 /// не бывает — там все ходы проигрывают.
@@ -158,10 +191,10 @@ const SACRIFICE_PLIES: usize = 5;
 /// комментаторы. `class` — класс хода по потере оценки: выдающимся бывает
 /// только лучший ход.
 ///
-/// - **Блестящий** (`!!`) — жертва, которая работает: соперник первым же
-///   ответом бьёт сходившую фигуру, и через несколько ходов лучшей линии
-///   материала у сходившего меньше, чем до хода, — а позиция после хода не
-///   хуже равной. В позиции, которая выиграна и без жертвы, блестящей
+/// - **Блестящий** (`!!`) — жертва, которая работает: позиция после хода не
+///   хуже равной, хотя ход отдаёт материал (см. [`is_sacrifice`]) — соперник
+///   его берёт, или лучшая защита его не берёт, потому что взятие
+///   проигрывает. В позиции, которая выиграна и без жертвы, блестящей
 ///   считается только жертва, ведущая к мату.
 /// - **Сильный** (`!`) — единственный ход (см. [`is_only_move`]), и его
 ///   нашли. Взятие в ответ на взятие — просто размен, не находка.
@@ -184,11 +217,74 @@ pub fn standout(class: MoveClass, context: &MoveContext<'_>, thresholds: &Thresh
     (!recapture && is_only_move(mover, context.best, second, thresholds)).then_some(MoveClass::Great)
 }
 
-/// Жертва фигуры: соперник первым же ответом бьёт сходившую фигуру (не
-/// пешку), и после [`SACRIFICE_PLIES`] полуходов лучшей защиты у сходившего
-/// меньше материала, чем до хода. Размен, где материал тут же возвращается,
-/// жертвой не считается; превращение, которое сразу забирают, — тоже.
+/// Жертва фигуры — принятая или предложенная.
+///
+/// - Принятая: соперник первым же ответом бьёт сходившую фигуру (не пешку),
+///   и после [`SACRIFICE_PLIES`] полуходов лучшей защиты у сходившего меньше
+///   материала, чем до хода. Размен, где материал тут же возвращается,
+///   жертвой не считается; превращение, которое сразу забирают, — тоже.
+/// - Предложенная: ход оставляет под боем фигуру, взять которую выгодно
+///   хотя бы на две пешки ([`OFFERED`]) — сверх того, что висело до хода и
+///   что ход забрал сам. Лучшая защита такую жертву не берёт, потому что
+///   взятие проигрывает, — как в мате Легаля, где 5.Кxe5 отдаёт ферзя.
 fn is_sacrifice(before: &Chess, played: Move, reply: &[Move]) -> bool {
+    accepted(before, played, reply) || offered(before, played)
+}
+
+/// Столько пешек материала должен оставить под боем ход, чтобы считаться
+/// предложенной жертвой: лёгкая фигура за пешку — да, размен — нет.
+const OFFERED: i32 = 2;
+
+fn offered(before: &Chess, played: Move) -> bool {
+    if played.is_promotion() {
+        return false;
+    }
+    let mut after = before.clone();
+    after.play_unchecked(played);
+    // Что висело до хода: как если бы ходил соперник. Под шахом ход не
+    // передать — тогда и висящего не считаем.
+    let hung = before.clone().swap_turn().map_or(0, |position| hanging(&position).0);
+    let taken = played.capture().map_or(0, value);
+    hanging(&after).0 - hung - taken >= OFFERED
+}
+
+/// Какую фигуру отдаёт выдающийся ход — для подсказки «жертва ферзя»: ту,
+/// что он оставил под боем, или сходившую, если жертвуют её.
+pub fn sacrificed_piece(before: &Chess, played: Move) -> Role {
+    let left = offered(before, played)
+        .then(|| {
+            let mut after = before.clone();
+            after.play_unchecked(played);
+            hanging(&after).1
+        })
+        .flatten();
+    left.unwrap_or(played.role())
+}
+
+/// Самое выгодное взятие фигуры (не пешки) у стороны, которая только что
+/// сходила: выигрыш в пешках и какую фигуру берут. Незащищённая фигура
+/// стоит своей цены целиком, за защищённую отдают ещё и того, кто её взял.
+/// Это оценка «на глаз», без перебора разменов, — ей и не нужно больше:
+/// решает, жертва ли ход, движок (ход должен быть лучшим).
+fn hanging(position: &Chess) -> (i32, Option<Role>) {
+    let owner = !position.turn();
+    let board = position.board();
+    position
+        .legal_moves()
+        .iter()
+        .filter_map(|mv| {
+            let captured = mv.capture().filter(|&role| role != Role::Pawn)?;
+            // Защитники — с учётом тех, что стоят за взявшим на одной линии.
+            let occupied = board.occupied() ^ Bitboard::from(mv.from()?);
+            let defended = board.attacks_to(mv.to(), owner, occupied).any();
+            Some((value(captured) - if defended { value(mv.role()) } else { 0 }, captured))
+        })
+        .filter(|&(gain, _)| gain > 0)
+        .max_by_key(|&(gain, role)| (gain, value(role)))
+        .map_or((0, None), |(gain, role)| (gain, Some(role)))
+}
+
+fn accepted(before: &Chess, played: Move, reply: &[Move]) -> bool {
     let mover = before.turn();
     if played.role() == Role::Pawn || played.is_promotion() {
         return false;
@@ -208,15 +304,19 @@ fn is_sacrifice(before: &Chess, played: Move, reply: &[Move]) -> bool {
     balance(position.board(), mover) < start
 }
 
-/// Перевес в материале у стороны `color`, в пешках.
-fn balance(board: &Board, color: Color) -> i32 {
-    let value = |role: Role| match role {
+/// Цена фигуры в пешках.
+fn value(role: Role) -> i32 {
+    match role {
         Role::Pawn => 1,
         Role::Knight | Role::Bishop => 3,
         Role::Rook => 5,
         Role::Queen => 9,
         Role::King => 0,
-    };
+    }
+}
+
+/// Перевес в материале у стороны `color`, в пешках.
+fn balance(board: &Board, color: Color) -> i32 {
     let side = |color: Color| {
         board.by_color(color).into_iter().filter_map(|square| board.role_at(square)).map(value).sum::<i32>()
     };
@@ -262,6 +362,39 @@ mod tests {
         assert_eq!(a.class, MoveClass::Blunder);
         assert!(a.missed_win);
         assert_eq!(a.class.symbol(), Some("??"));
+    }
+
+    #[test]
+    fn mate_on_the_board_is_the_best_move_there_is() {
+        let t = Thresholds::default();
+        let mate = Ending::Checkmate { winner: Color::Black };
+        let a = assess_ending(Color::Black, mate, None, false, &t).unwrap();
+        assert_eq!(a.class, MoveClass::Best);
+        assert_eq!(a.before, Score::Mate(-1), "without an engine it was mate in one");
+        assert_eq!(a.after, Score::Mate(0));
+        // Даже если движок видел мат дольше — поставленный мат лучше любого.
+        let a = assess_ending(
+            Color::White,
+            Ending::Checkmate { winner: Color::White },
+            Some(Score::Mate(4)),
+            false,
+            &t,
+        );
+        assert_eq!(a.unwrap().class, MoveClass::Best);
+    }
+
+    #[test]
+    fn stalemating_a_won_game_is_a_blunder() {
+        let t = Thresholds::default();
+        let a = assess_ending(Color::White, Ending::Stalemate, Some(Score::Cp(900)), false, &t).unwrap();
+        assert_eq!(a.class, MoveClass::Blunder);
+        assert!(a.missed_win);
+        assert_eq!(a.after, Score::Cp(0));
+        // Проигрывающему пат — спасение, а не ошибка.
+        let a = assess_ending(Color::Black, Ending::Stalemate, Some(Score::Cp(900)), true, &t).unwrap();
+        assert_eq!(a.class, MoveClass::Best);
+        // Без оценки позиции до хода судить не по чему.
+        assert_eq!(assess_ending(Color::White, Ending::InsufficientMaterial, None, false, &t), None);
     }
 
     /// «Оперная партия» (Морфи, 1858): позиция перед ходом `ply` (с нуля),
@@ -326,6 +459,54 @@ mod tests {
         );
         // Та же жертва, но без мата — в выигранной партии это просто лучший ход.
         assert_eq!(standout_at(30, Score::Cp(900), Score::Cp(900), Score::Cp(900)), None);
+    }
+
+    #[test]
+    fn a_queen_left_to_be_taken_is_brilliant_even_when_declined() {
+        // Мат Легаля: 5.Кxe5! оставляет ферзя под слоном g4. Лучшая защита —
+        // 5…dxe5, а не 5…Сxd1?? 6.Сxf7+ Крe7 7.Кd5#: жертву не берут.
+        let mut before = Chess::default();
+        let san = |position: &Chess, text: &str| {
+            text.parse::<shakmaty::san::San>().unwrap().to_move(position).unwrap()
+        };
+        for text in ["e4", "e5", "Nf3", "d6", "Bc4", "Bg4", "Nc3", "g6"] {
+            let mv = san(&before, text);
+            before.play_unchecked(mv);
+        }
+        let played = san(&before, "Nxe5");
+        let mut after = before.clone();
+        after.play_unchecked(played);
+        let declined = [san(&after, "dxe5")];
+        let context = MoveContext {
+            before: &before,
+            played,
+            previous: None,
+            best: Score::Cp(250),
+            second: Some(Score::Cp(60)),
+            after: Score::Cp(250),
+            reply: &declined,
+        };
+        assert_eq!(standout(MoveClass::Best, &context, &Thresholds::default()), Some(MoveClass::Brilliant));
+        // Отдан ферзь, а не конь, который сходил.
+        assert_eq!(sacrificed_piece(&before, played), Role::Queen);
+        // Первый ход партии ничего не отдаёт.
+        assert!(!offered(&Chess::default(), san(&Chess::default(), "e4")));
+    }
+
+    #[test]
+    fn hanging_counts_what_is_left_to_be_taken() {
+        let position = |fen: &str| {
+            fen.parse::<shakmaty::fen::Fen>()
+                .unwrap()
+                .into_position::<Chess>(shakmaty::CastlingMode::Standard)
+                .unwrap()
+        };
+        // Чёрные ходят; белый конь d5 не защищён — висит целиком.
+        assert_eq!(hanging(&position("4k3/8/4p3/3N4/8/8/8/4K3 b - - 0 1")), (3, Some(Role::Knight)));
+        // Защищён пешкой e4: взять его пешкой — выигрыш двух пешек.
+        assert_eq!(hanging(&position("4k3/8/4p3/3N4/4P3/8/8/4K3 b - - 0 1")).0, 2);
+        // Пешки не в счёт.
+        assert_eq!(hanging(&position("4k3/8/4p3/3P4/8/8/8/4K3 b - - 0 1")), (0, None));
     }
 
     #[test]

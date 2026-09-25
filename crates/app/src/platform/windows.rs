@@ -14,18 +14,23 @@ use windows::Win32::UI::WindowsAndMessaging::{
     SetWindowPos, WS_EX_TOPMOST,
 };
 
-/// Моноширинный шрифт цифр: есть в каждой Windows начиная с Vista.
+/// Моноширинный шрифт — для клавиш в подсказках: есть в каждой Windows начиная с Vista.
 pub const MONO_FONT: &str = "Consolas";
+/// Антиква заголовков: Georgia есть в каждой системе и с кириллицей.
+pub const SERIF_FONT: &str = "Georgia";
 /// Приписка модификатора в подсказках клавиш: «Ctrl+O».
 pub const COMMAND: &str = "Ctrl+";
-/// Место под кнопки окна в заголовке: слева только отступ, справа —
-/// «свернуть», «развернуть», «закрыть» по 34 точки (их рисует gpui-component).
-pub const TITLE_CONTROLS_LEFT: f32 = 12.0;
-pub const TITLE_CONTROLS_RIGHT: f32 = 3.0 * 34.0;
 pub const PINNED_NOTICE: &str = "Окно поверх всех окон";
 
 /// Подсказка под кнопкой выбора окна трансляции.
 pub const PICKER_HINT: &str = "Windows покажет список окон — выберите окно браузера или плеера. Вокруг него может появиться жёлтая рамка: её видите только вы.";
+
+/// Место под кнопки окна в заголовке, слева и справа: слева только отступ,
+/// справа — «свернуть», «развернуть», «закрыть» по 34 точки (их рисует
+/// gpui-component).
+pub fn title_controls(_window: &Window) -> (f32, f32) {
+    (12.0, 3.0 * 34.0)
+}
 
 /// Каким окно было до закрепления — чтобы открепить его ровно в то же.
 #[derive(Clone, Copy, Debug)]

@@ -1,6 +1,6 @@
 [package]
 name = "analyzer-capture"
-description = "Захват окна трансляции: ScreenCaptureKit на macOS, Windows.Graphics.Capture на Windows"
+description = "Захват окна трансляции: ScreenCaptureKit на macOS, Windows.Graphics.Capture на Windows, портал и PipeWire (или X11) на Linux"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -29,6 +29,16 @@ windows = { workspace = true, features = [
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_Shell",
 ] }
+
+# Linux: портал рабочего стола (xdg-desktop-portal) показывает системный
+# выбор окна и отдаёт его поток PipeWire — так работают Wayland, GNOME и KDE.
+# Где портала нет (X11 без GNOME и KDE), окно захватывается напрямую у X11.
+# ashpd — с тем же движком async-io, что у GPUI: второй не понадобится.
+[target.'cfg(target_os = "linux")'.dependencies]
+ashpd = { version = "0.13", default-features = false, features = ["async-io", "screencast"] }
+futures-lite = "2.6"
+pipewire = "0.10"
+x11rb = { workspace = true, features = ["composite"] }
 
 # Проверка захвата рисует своё окно и захватывает его без системного выбора.
 [target.'cfg(target_os = "windows")'.dev-dependencies]

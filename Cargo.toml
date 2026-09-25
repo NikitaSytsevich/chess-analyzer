@@ -32,6 +32,9 @@ objc2 = "0.6.4"
 objc2-app-kit = { version = "0.3.2", default-features = false, features = ["NSResponder", "NSView", "NSWindow"] }
 raw-window-handle = { version = "0.6.2", features = ["std"] }
 windows = { version = "0.62", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging"] }
+# Linux: X11 — «поверх всех окон» и захват окна там, где нет портала рабочего
+# стола. Та же версия, что внутри GPUI; своё подключение без C-библиотек.
+x11rb = "0.13.2"
 shakmaty = "0.30.1"
 
 anyhow = "1.0.104"

@@ -6,7 +6,8 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 
 use analyzer_chess::{
-    Assessment, CastlingMode, Color, Ending, Game, Move, MoveClass, Notation, Score, Square, UciMove,
+    Assessment, CastlingMode, Color, Ending, Game, Move, MoveClass, Position, Score, Square, UciMove,
+    game_accuracy, move_accuracy,
 };
 use analyzer_engine::AnalysisUpdate;
 use analyzer_session::{Event, GameEvent, Hint, RecognitionStatus};
@@ -29,7 +30,6 @@ pub struct Model {
     pub recognition: Option<RecognitionStatus>,
     pub engine_name: Option<String>,
     pub engine_error: Option<String>,
-    pub notation: Notation,
 }
 
 impl Model {
@@ -107,6 +107,31 @@ impl Model {
             UciMove::Normal { from, to, .. } => Some((from, to)),
             _ => None,
         }
+    }
+
+    /// Точность стороны `color` за партию, в процентах (см.
+    /// `analyzer_chess::game_accuracy`) — по оценённым ходам. Лучший ход и
+    /// выдающиеся — 100%, даже если на большей глубине движок передумал:
+    /// значок на доске и точность не должны спорить.
+    pub fn accuracy(&self, color: Color) -> Option<f32> {
+        let game = self.game.as_ref()?;
+        let moves = self.assessments.iter().filter_map(|(&ply, (assessment, _))| {
+            let mover = game.position(ply.checked_sub(1).filter(|&before| before < game.len())?).turn();
+            (mover == color).then(|| match assessment.class {
+                MoveClass::Brilliant | MoveClass::Great | MoveClass::Best => 100.0,
+                _ => move_accuracy(assessment.loss),
+            })
+        });
+        game_accuracy(moves)
+    }
+
+    /// Подсказка к текущему моменту партии: к последнему ходу или к позиции
+    /// на доске. Подсказка об ошибке приходит, когда класс хода устоялся, —
+    /// порой уже после ответа соперника, поэтому она держится ещё полуход.
+    /// После отката подсказки к взятым назад ходам уходят.
+    pub fn current_hint(&self) -> Option<&Hint> {
+        let now = self.game.as_ref()?.len();
+        self.hints.iter().find(|hint| hint.ply <= now && hint.ply + 1 >= now)
     }
 
     /// Класс последнего хода для значка на доске: номер полухода, клетка,
@@ -221,6 +246,51 @@ mod tests {
         let (mv, san) = (three.plies()[2].mv, three.plies()[2].san);
         model.apply(Event::Game { game: three, change: GameEvent::Moved { ply: 3, mv, san } });
         assert_eq!(model.last_badge(), None);
+    }
+
+    #[test]
+    fn accuracy_is_counted_for_each_side() {
+        let mut model = Model::default();
+        let two = game(&["e2e4", "e7e5"]);
+        let (mv, san) = (two.plies()[1].mv, two.plies()[1].san);
+        model.apply(Event::Game { game: two, change: GameEvent::Moved { ply: 2, mv, san } });
+        assert_eq!(model.accuracy(Color::White), None, "nothing is assessed yet");
+        let thresholds = analyzer_chess::Thresholds::default();
+        let best = analyzer_chess::assess(Color::White, Score::Cp(20), Score::Cp(-60), true, &thresholds);
+        let mistake = analyzer_chess::assess(Color::Black, Score::Cp(20), Score::Cp(140), false, &thresholds);
+        assert_eq!(mistake.class, MoveClass::Mistake);
+        model.apply(Event::Assessment { ply: 1, assessment: best, best: None, final_: true });
+        model.apply(Event::Assessment { ply: 2, assessment: mistake, best: None, final_: true });
+        // Первый ход движка — 100%, хоть оценка после него и просела.
+        assert_eq!(model.accuracy(Color::White), Some(100.0));
+        let black = model.accuracy(Color::Black).unwrap();
+        assert!(black > 60.0 && black < 80.0, "{black}");
+    }
+
+    #[test]
+    fn only_the_hint_about_the_current_moment_is_shown() {
+        use analyzer_session::HintKind;
+
+        let hint = |ply, kind| Event::Hint(Hint { ply, kind, text: format!("{kind:?} {ply}") });
+        let mut model = Model::default();
+        model.apply(hint(1, HintKind::OnlyMove));
+        assert_eq!(model.current_hint(), None, "no game yet");
+
+        let three = game(&["e2e4", "e7e5", "g1f3"]);
+        let (mv, san) = (three.plies()[2].mv, three.plies()[2].san);
+        model.apply(Event::Game { game: three, change: GameEvent::Moved { ply: 3, mv, san } });
+        assert_eq!(model.current_hint(), None, "a hint two plies old is stale");
+
+        model.apply(hint(2, HintKind::Mistake));
+        assert_eq!(model.current_hint().map(|h| h.ply), Some(2), "a late hint about the reply stays");
+        model.apply(hint(3, HintKind::OnlyMove));
+        model.apply(hint(4, HintKind::Blunder));
+        assert_eq!(model.current_hint().map(|h| h.ply), Some(3), "hints from the future are skipped");
+
+        // Откат на полуход 1: подсказки к взятым назад ходам уходят, а та, что
+        // была к позиции после 1.e4, снова к месту.
+        model.apply(Event::Game { game: game(&["e2e4"]), change: GameEvent::TookBack { to_ply: 1 } });
+        assert_eq!(model.current_hint().map(|h| h.ply), Some(1));
     }
 
     #[test]

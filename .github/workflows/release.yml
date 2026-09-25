@@ -1,0 +1,144 @@
+# Выпуск: готовые сборки для Windows, Linux и macOS на странице Releases.
+#
+# Выпуск — это новая версия в Cargo.toml ([workspace.package] version),
+# попавшая в main. Если тега v<версия> ещё нет, сборки проходят проверки
+# CI, macOS собирается здесь же, и появляется релиз с этим тегом. Если тег
+# уже есть, ничего не собирается. На PR, который меняет этот файл, всё
+# собирается, но не публикуется.
+name: Release
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    paths: [.github/workflows/release.yml, .github/release-notes.md]
+  workflow_dispatch:
+
+# Не «${{ github.workflow }}-…»: так называется группа вызванного CI, а
+# одинаковые группы у вызывающего и вызванного процессов ждут друг друга.
+concurrency:
+  group: publish-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  version:
+    name: Версия
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      build: ${{ steps.version.outputs.build }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Версия из Cargo.toml и её тег
+        id: version
+        run: |
+          version=$(awk -F'"' '/^\[workspace\.package\]/ { inside = 1; next }
+                               /^\[/ { inside = 0 }
+                               inside && /^version *=/ { print $2; exit }' Cargo.toml)
+          test -n "$version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          if [ "$GITHUB_EVENT_NAME" = pull_request ]; then
+            echo "build=true" >> "$GITHUB_OUTPUT"
+          elif git ls-remote --exit-code --tags origin "refs/tags/v$version" > /dev/null; then
+            echo "build=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::v$version уже выпущена. Чтобы выпустить новую, поднимите version в Cargo.toml."
+          else
+            echo "build=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  ci:
+    name: CI
+    needs: version
+    if: needs.version.outputs.build == 'true'
+    uses: ./.github/workflows/ci.yml
+
+  macos:
+    name: macOS — проверки и сборка
+    needs: version
+    if: needs.version.outputs.build == 'true'
+    # macOS 26: мост GPUI к Metal (apple-metal) собирается только с SDK
+    # macOS 26 — Xcode 16 на macos-15 его не знает. Готовая программа
+    # по-прежнему запускается на macOS 15.
+    runs-on: macos-26
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Rust из rust-toolchain.toml
+        run: rustup toolchain install
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Clippy без предупреждений
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Тесты
+        run: cargo test --workspace
+
+      - name: Сборка приложения
+        run: cargo xtask bundle --release
+
+      # Образ с программой и ярлыком «Программы»: открыть и перетащить.
+      # hdiutil на машинах Actions изредка отвечает «Resource busy» —
+      # отсюда повтор.
+      - name: Образ диска
+        run: |
+          mkdir dmg
+          ditto "target/release/Шахматный анализатор.app" "dmg/Шахматный анализатор.app"
+          ln -s /Applications dmg/Applications
+          for attempt in 1 2 3; do
+            hdiutil create -volname "Шахматный анализатор" -srcfolder dmg -ov -format UDZO \
+              chess-analyzer-macos-arm64.dmg && break
+            sleep 10
+          done
+          test -f chess-analyzer-macos-arm64.dmg
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: chess-analyzer-macos-arm64
+          path: chess-analyzer-macos-arm64.dmg
+          if-no-files-found: error
+
+  release:
+    name: Релиз
+    needs: [version, ci, macos]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+
+      # Папку Windows — в zip; Python помечает русские имена как UTF-8, и
+      # Проводник распаковывает их без кракозябр.
+      - name: Файлы релиза
+        run: |
+          mkdir release
+          (cd dist && mv chess-analyzer-windows-x64 "Шахматный анализатор" &&
+            python3 -m zipfile -c ../release/chess-analyzer-windows-x64.zip "Шахматный анализатор")
+          mv dist/chess-analyzer-linux-x64/chess-analyzer-linux-x64.tar.gz release/
+          mv dist/chess-analyzer-macos-arm64/chess-analyzer-macos-arm64.dmg release/
+          (cd release && sha256sum -- * > SHA256SUMS.txt && cat SHA256SUMS.txt)
+
+      - name: Публикация
+        if: github.event_name != 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          gh release create "v$VERSION" release/* \
+            --target "$GITHUB_SHA" \
+            --title "Шахматный анализатор $VERSION" \
+            --notes-file .github/release-notes.md \
+            --generate-notes

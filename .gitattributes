@@ -3,3 +3,4 @@
 * text=auto eol=lf
 *.png binary
 *.icns binary
+*.ico binary

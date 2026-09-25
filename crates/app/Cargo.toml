@@ -19,8 +19,9 @@ analyzer-engine.workspace = true
 analyzer-session.workspace = true
 analyzer-vision.workspace = true
 gpui-kit.workspace = true
-# Тот же image, что внутри GPUI: превью кадра передаётся ему как image::Frame.
-image = { version = "0.25", default-features = false }
+# Тот же image, что внутри GPUI: превью кадра передаётся ему как image::Frame,
+# а иконка окна на Linux читается из PNG.
+image = { version = "0.25", default-features = false, features = ["png"] }
 raw-window-handle.workspace = true
 flume.workspace = true
 anyhow.workspace = true
@@ -33,6 +34,9 @@ objc2-app-kit.workspace = true
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+x11rb.workspace = true
 
 [lints]
 workspace = true

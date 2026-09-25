@@ -6,7 +6,9 @@
 //! - macOS — `.app` с ad-hoc подписью; инструменты — из Command Line Tools
 //!   (`curl`, `tar`, `lipo`, `codesign`), Xcode не нужен;
 //! - Windows — папка с программой и движком; `curl` и `tar` есть в самой
-//!   Windows 10 и 11.
+//!   Windows 10 и 11;
+//! - Linux — папка с программой, движком, иконкой и `install.sh`, который
+//!   добавляет ярлык в меню приложений.
 //!
 //! Контрольные суммы считаются здесь же, на Rust, — одинаково везде.
 
@@ -66,8 +68,20 @@ fn stockfish_asset() -> Result<StockfishAsset> {
             sha256: "8372ad3f0d7276deb2c70f801f541ec7db463219fc6d9c7592864e542aa4f401",
             megabytes: 77,
         }
+    } else if cfg!(all(target_os = "linux", target_arch = "x86_64")) {
+        StockfishAsset {
+            archive: "stockfish-linux-x86-64-universal.tar.gz",
+            sha256: "9defc0d4e55d49c65a6d042f3e571a39fcea499ade6dbe741b53b8c65e03611f",
+            megabytes: 78,
+        }
+    } else if cfg!(all(target_os = "linux", target_arch = "aarch64")) {
+        StockfishAsset {
+            archive: "stockfish-linux-arm64-universal.tar.gz",
+            sha256: "fe26cfd1d9db4c8af3d21e24d9ff34cacb31c1f940085a7583da11796f2bac01",
+            megabytes: 77,
+        }
     } else {
-        bail!("сборка Stockfish для этой системы не выбрана — нужна macOS или Windows")
+        bail!("сборка Stockfish для этой системы не выбрана — нужны macOS, Windows или Linux")
     })
 }
 
@@ -90,7 +104,7 @@ fn main() -> Result<()> {
                 "использование: cargo xtask <команда> [--release]\n\n\
                  fetch-stockfish  скачать и проверить Stockfish 19 в vendor/\n\
                  bundle           собрать приложение в target/: «{APP_NAME}.app» на macOS,\n\
-                 \x20                папка «{APP_NAME}» на Windows\n\
+                 \x20                папка «{APP_NAME}» на Windows и Linux\n\
                  run              собрать приложение и запустить с журналом в терминале\n\
                  ci               rustfmt, clippy без предупреждений, тесты\n\
                  icons            перерисовать иконку приложения из assets/icon/icon.svg"
@@ -207,8 +221,10 @@ fn bundle(release: bool) -> Result<PathBuf> {
         bundle_macos(&target, &stockfish)
     } else if cfg!(windows) {
         bundle_windows(&target, &stockfish)
+    } else if cfg!(target_os = "linux") {
+        bundle_linux(&target, &stockfish)
     } else {
-        bail!("упаковка приложения есть только для macOS и Windows")
+        bail!("упаковка приложения есть только для macOS, Windows и Linux")
     }
 }
 
@@ -246,6 +262,77 @@ fn bundle_windows(target: &Path, stockfish: &Path) -> Result<PathBuf> {
     fs::copy(root().join("LICENSE"), folder.join("LICENSE.txt"))?;
     Ok(folder)
 }
+
+/// Папка приложения на Linux: программа, рядом `engines/stockfish` (там его
+/// ищет `locate_stockfish`), иконка, лицензии и `install.sh` — он кладёт в
+/// меню приложений ярлык на эту папку. Программа работает и без него:
+/// папку можно запускать откуда угодно.
+fn bundle_linux(target: &Path, stockfish: &Path) -> Result<PathBuf> {
+    let folder = target.join(APP_NAME);
+    fs::remove_dir_all(&folder).ok();
+    fs::create_dir_all(folder.join("engines"))?;
+    fs::copy(target.join(EXECUTABLE), folder.join(EXECUTABLE))?;
+    fs::copy(stockfish, folder.join("engines").join(stockfish_file()))?;
+    copy_stockfish_license(stockfish, &folder.join("engines"))?;
+    fs::copy(root().join("LICENSE"), folder.join("LICENSE.txt"))?;
+    fs::copy(root().join("assets/icon/icon.png"), folder.join(format!("{EXECUTABLE}.png")))?;
+    fs::write(folder.join(format!("{BUNDLE_ID}.desktop")), desktop_entry())?;
+    let install = folder.join("install.sh");
+    fs::write(&install, INSTALL_SH)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        fs::set_permissions(&install, fs::Permissions::from_mode(0o755))?;
+    }
+    Ok(folder)
+}
+
+/// Ярлык для меню приложений. Имя файла и `StartupWMClass` — тот же
+/// идентификатор, что окно сообщает системе (`app_id`): по нему Wayland и
+/// панели задач находят иконку окна. Путь к папке `install.sh` подставит
+/// вместо `@DIR@`.
+fn desktop_entry() -> String {
+    format!(
+        r#"[Desktop Entry]
+Type=Application
+Name={APP_NAME}
+Name[en]=Chess Analyzer
+GenericName=Суфлёр комментатора шахматных трансляций
+GenericName[en]=Chess broadcast commentator's prompter
+Comment=Stockfish следит за партией в окне трансляции: оценка, лучшие ходы, ошибки
+Comment[en]=Stockfish follows the game in a broadcast window: evaluation, best moves, mistakes
+Exec="@DIR@/{EXECUTABLE}"
+Icon={BUNDLE_ID}
+Terminal=false
+Categories=Game;BoardGame;
+Keywords=chess;stockfish;broadcast;шахматы;анализ;трансляция;
+StartupWMClass={BUNDLE_ID}
+"#
+    )
+}
+
+/// Ярлык в меню приложений — только для этого пользователя, без прав
+/// администратора. `--remove` убирает его.
+const INSTALL_SH: &str = r#"#!/bin/sh
+# Шахматный анализатор: ярлык в меню приложений для этого пользователя.
+# Программа остаётся в этой папке. ./install.sh --remove — убрать ярлык.
+set -eu
+dir=$(cd "$(dirname "$0")" && pwd)
+id=by.sytsevich.chess-analyzer
+data=${XDG_DATA_HOME:-$HOME/.local/share}
+apps=$data/applications
+icons=$data/icons/hicolor/256x256/apps
+if [ "${1:-}" = "--remove" ]; then
+    rm -f "$apps/$id.desktop" "$icons/$id.png"
+    echo "Ярлык убран."
+    exit 0
+fi
+mkdir -p "$apps" "$icons"
+cp "$dir/chess-analyzer.png" "$icons/$id.png"
+sed "s|@DIR@|$dir|g" "$dir/$id.desktop" > "$apps/$id.desktop"
+update-desktop-database "$apps" 2>/dev/null || true
+echo "Готово: «Шахматный анализатор» — в меню приложений."
+"#;
 
 fn copy_stockfish_license(stockfish: &Path, into: &Path) -> Result<()> {
     if let Some(license) = stockfish.parent().map(|dir| dir.join("COPYING.txt")).filter(|path| path.exists())
@@ -290,8 +377,10 @@ fn run(release: bool) -> Result<()> {
     // macOS всё равно видит приложение с его Info.plist.
     let executable = if cfg!(target_os = "macos") {
         bundle.join("Contents/MacOS").join(EXECUTABLE)
-    } else {
+    } else if cfg!(windows) {
         bundle.join(format!("{APP_NAME}.exe"))
+    } else {
+        bundle.join(EXECUTABLE)
     };
     run_checked(&mut Command::new(executable))
 }

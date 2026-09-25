@@ -11,17 +11,21 @@ use objc2::rc::Retained;
 use objc2_app_kit::{NSFloatingWindowLevel, NSView, NSWindow, NSWindowCollectionBehavior, NSWindowLevel};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
-/// Моноширинный шрифт цифр.
+/// Моноширинный шрифт — для клавиш в подсказках.
 pub const MONO_FONT: &str = "Menlo";
+/// Антиква заголовков: Georgia есть в каждой системе и с кириллицей.
+pub const SERIF_FONT: &str = "Georgia";
 /// Приписка модификатора в подсказках клавиш: «⌘O».
 pub const COMMAND: &str = "⌘";
-/// Место под кнопки окна в заголовке: «светофор» слева, справа — ничего.
-pub const TITLE_CONTROLS_LEFT: f32 = 80.0;
-pub const TITLE_CONTROLS_RIGHT: f32 = 0.0;
 pub const PINNED_NOTICE: &str = "Окно поверх всех окон и на всех рабочих столах";
 
 /// Подсказка под кнопкой выбора окна трансляции.
 pub const PICKER_HINT: &str = "macOS покажет список окон — выберите окно браузера или плеера. Разрешение на запись экрана не понадобится.";
+
+/// Место под кнопки окна в заголовке, слева и справа: «светофор» слева.
+pub fn title_controls(_window: &Window) -> (f32, f32) {
+    (80.0, 0.0)
+}
 
 /// Каким окно было до закрепления — чтобы открепить его ровно в то же.
 #[derive(Clone, Copy, Debug)]

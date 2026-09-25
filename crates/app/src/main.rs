@@ -6,6 +6,7 @@
 // Выпускная сборка на Windows — оконная программа: без окна консоли рядом.
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
+mod assets;
 mod model;
 mod pieces;
 mod platform;
@@ -16,7 +17,13 @@ mod workspace;
 use gpui_kit::component::{Root, TitleBar};
 use gpui_kit::*;
 
+use crate::assets::AppAssets;
 use crate::workspace::Workspace;
+
+/// Имя приложения для рабочего стола Linux: по нему окно находит свой ярлык
+/// `.desktop` (иконку и название в панели задач). То же, что `BUNDLE_ID` в
+/// упаковке.
+const APP_ID: &str = "by.sytsevich.chess-analyzer";
 
 fn main() {
     tracing_subscriber::fmt()
@@ -29,23 +36,34 @@ fn main() {
     // проверить изменения интерфейса) без трансляции и без лишних кликов.
     let demo = std::env::args().any(|arg| arg == "--demo");
 
-    // Полный каталог иконок Lucide: без источника ресурсов иконки не рисуются.
-    gpui_kit::application().with_assets(gpui_kit::assets::AllAssets).run(move |cx| {
+    // Свои значки и полный каталог иконок Lucide: без источника ресурсов
+    // иконки не рисуются.
+    gpui_kit::application().with_assets(AppAssets).run(move |cx| {
         gpui_kit::init(cx);
-        theme::apply(cx);
+        theme::apply(theme::is_dark(cx.window_appearance()), cx);
         cx.bind_keys(workspace::key_bindings());
         let options = WindowOptions {
-            window_bounds: Some(WindowBounds::centered(size(px(1280.), px(820.)), cx)),
-            // Узкое окно — доска со шкалой рядом с трансляцией, панель прячется сама.
+            // Окно — впритык к доске со шкалой, подписью и графиком: рядом
+            // остаётся место для трансляции.
+            window_bounds: Some(WindowBounds::centered(workspace::window_size(560., true), cx)),
+            // Совсем узкое окно — доска со шкалой, подпись и график прячутся сами.
             window_min_size: Some(size(px(340.), px(400.))),
+            // Linux: заголовок рисуем сами, как на macOS и Windows, — с
+            // индикаторами и кнопками. Где оконный менеджер этого не умеет,
+            // он нарисует свою рамку, и кнопки окна будут на ней.
+            window_decorations: Some(WindowDecorations::Client),
+            app_id: Some(APP_ID.to_owned()),
+            icon: window_icon(),
             ..TitleBar::window_options()
         };
         cx.open_window(options, move |window, cx| {
             window.set_window_title("Шахматный анализатор");
+            // У окна оформление точнее, чем у приложения (на Linux — только у окна).
+            theme::apply(theme::is_dark(window.appearance()), cx);
             let view = cx.new(|cx| {
                 let mut workspace = Workspace::new(window, cx);
                 if demo {
-                    workspace.start_demo(cx);
+                    workspace.start_demo(window, cx);
                 }
                 workspace
             });
@@ -54,4 +72,20 @@ fn main() {
         .expect("failed to open the main window");
         cx.activate(true);
     });
+}
+
+/// Иконка окна для X11 (на Wayland и других системах иконку окну даёт
+/// ярлык приложения или сама программа).
+fn window_icon() -> Option<std::sync::Arc<image::RgbaImage>> {
+    if !cfg!(target_os = "linux") {
+        return None;
+    }
+    let png = include_bytes!("../../../assets/icon/icon.png");
+    match image::load_from_memory_with_format(png, image::ImageFormat::Png) {
+        Ok(icon) => Some(std::sync::Arc::new(icon.into_rgba8())),
+        Err(error) => {
+            tracing::warn!(%error, "window icon");
+            None
+        }
+    }
 }

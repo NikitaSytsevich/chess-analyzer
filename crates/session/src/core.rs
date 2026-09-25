@@ -9,8 +9,8 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use analyzer_chess::{
-    Assessment, Chess, Game, Move, MoveClass, MoveContext, Notation, Position, Score, Thresholds, assess,
-    is_only_move, position_hash, standout,
+    Assessment, Chess, Ending, Game, Move, MoveClass, MoveContext, Notation, Position, Score, Thresholds,
+    assess, assess_ending, is_only_move, position_hash, standout,
 };
 use analyzer_engine::{AnalysisRequest, AnalysisUpdate, Engine, Line, PositionId};
 use analyzer_tracker::GameEvent;
@@ -35,6 +35,9 @@ const FINAL_DEPTH: u32 = 18;
 /// «Единственный ход» и мат объявляются не раньше этой глубины: на первых
 /// итерациях движок ещё путается.
 const HINT_DEPTH: u32 = 16;
+/// Столько позиций кэш оценок держит без разбора. Дальше в нём остаются
+/// только позиции текущей партии: комментатор может вести трансляцию часами.
+const KNOWN_LIMIT: usize = 4096;
 
 /// Класс хода и что о нём уже сказано интерфейсу.
 #[derive(Clone, Copy)]
@@ -136,9 +139,15 @@ impl Core {
             engine.stop();
             return;
         }
+        let hash = position_hash(game.current());
+        // Трекер нашёл сразу два хода — событий два, а позиция одна: второй
+        // запрос только оборвал бы начатый анализ.
+        if !new_game && self.current.is_some_and(|(_, current)| current == hash) {
+            return;
+        }
         let id = PositionId(self.next_id);
         self.next_id += 1;
-        self.current = Some((id, position_hash(game.current())));
+        self.current = Some((id, hash));
         engine.analyze(AnalysisRequest::from_game(id, game.as_ref(), new_game));
     }
 
@@ -150,11 +159,22 @@ impl Core {
         }
         let deeper = self.known.get(&hash).is_none_or(|known| update.depth >= known.depth);
         if deeper && !update.lines.is_empty() {
+            if self.known.len() >= KNOWN_LIMIT {
+                self.forget_other_games();
+            }
             self.known.insert(hash, Known { depth: update.depth, lines: update.lines.clone() });
         }
         self.position_hints(&update, out);
         out.push(Event::Analysis(update));
         self.assess_last(out);
+    }
+
+    /// Кэш оценок разросся: оставить только позиции текущей партии.
+    fn forget_other_games(&mut self) {
+        let Some(game) = &self.game else { return };
+        let keep: HashSet<u64> = (0..=game.len()).map(|ply| position_hash(game.position(ply))).collect();
+        self.known.retain(|hash, _| keep.contains(hash));
+        self.hinted.retain(|(hash, _)| keep.contains(hash));
     }
 
     /// Класс последнего хода по лучшим известным оценкам до и после него.
@@ -170,6 +190,10 @@ impl Core {
         }
         let before = game.position(ply - 1);
         let after = game.current();
+        if let Some(ending) = Ending::of(after) {
+            self.assess_ending(ply, before, ending, out);
+            return;
+        }
         let (Some(was), Some(now)) =
             (self.known.get(&position_hash(before)), self.known.get(&position_hash(after)))
         else {
@@ -219,6 +243,32 @@ impl Core {
         if final_ {
             self.move_hints(ply, before, played, best, &assessment, out);
         }
+    }
+
+    /// Ход `ply` закончил партию: мат, пат или «мало материала». Позицию
+    /// после него движок не анализирует — в ней нет ходов, — поэтому класс
+    /// ставится сразу и окончательно (см. [`assess_ending`]).
+    fn assess_ending(&mut self, ply: usize, before: &Chess, ending: Ending, out: &mut Vec<Event>) {
+        let Some(game) = self.game.clone() else { return };
+        let played = game.plies()[ply - 1].mv;
+        let best_line = self
+            .known
+            .get(&position_hash(before))
+            .filter(|was| was.depth >= ASSESS_DEPTH)
+            .and_then(|was| was.lines.first());
+        let best = best_line.and_then(|line| line.moves.first().copied());
+        let Some(assessment) = assess_ending(
+            before.turn(),
+            ending,
+            best_line.map(|line| line.score),
+            best == Some(played),
+            &self.thresholds,
+        ) else {
+            return;
+        };
+        self.assessed.insert(ply, Assessed { assessment, best, final_: true, shown: true });
+        out.push(Event::Assessment { ply, assessment, best, final_: true });
+        self.move_hints(ply, before, played, best, &assessment, out);
     }
 
     /// Ход `ply` больше не уточнится: сообщаем, каким он остался.
@@ -293,5 +343,120 @@ impl Core {
         {
             out.push(Event::Hint(only_move_hint(ply, &position, mv, second.score, self.notation)));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use analyzer_chess::{CastlingMode, Fen, UciMove};
+    use analyzer_engine::{EngineOptions, Line};
+    use analyzer_tracker::StartReason;
+
+    use super::*;
+    use crate::HintKind;
+
+    /// Движок, которого нет: запросы уходят в пустоту, а анализ тесты
+    /// подкладывают сами.
+    fn engine() -> Engine {
+        let (events, _) = flume::unbounded();
+        Engine::start(EngineOptions::new("/nonexistent/stockfish"), events)
+    }
+
+    fn start(core: &mut Core, engine: &Engine, position: Chess) -> Arc<Game> {
+        let game = Arc::new(Game::new(position.clone()));
+        let change = GameEvent::Started { position, reason: StartReason::First };
+        core.game_changed(Arc::clone(&game), &change, engine, &mut Vec::new());
+        game
+    }
+
+    fn play(core: &mut Core, engine: &Engine, game: &Game, uci: &str) -> (Arc<Game>, Vec<Event>) {
+        let mut next = game.clone();
+        let mv = uci.parse::<UciMove>().unwrap().to_move(next.current()).unwrap();
+        let ply = next.play(mv).unwrap().clone();
+        let next = Arc::new(next);
+        let change = GameEvent::Moved { ply: next.len(), mv: ply.mv, san: ply.san };
+        let mut out = Vec::new();
+        core.game_changed(Arc::clone(&next), &change, engine, &mut out);
+        (next, out)
+    }
+
+    /// Движок досчитал текущую позицию: `score` и лучший ход `best`.
+    fn analysed(core: &mut Core, game: &Game, depth: u32, score: Score, best: &str) {
+        let (id, _) = core.current.expect("the position is being analysed");
+        let mv = best.parse::<UciMove>().unwrap().to_move(game.current()).unwrap();
+        let line = Line { multipv: 1, depth, score, wdl: None, moves: vec![mv] };
+        let update = AnalysisUpdate {
+            id,
+            depth,
+            seldepth: depth,
+            nodes: 0,
+            nps: 0,
+            hashfull: 0,
+            elapsed: std::time::Duration::ZERO,
+            lines: vec![line],
+        };
+        core.analysis(update, &mut Vec::new());
+    }
+
+    fn assessment(events: &[Event], of: usize) -> Option<Assessment> {
+        events.iter().find_map(|event| match event {
+            Event::Assessment { ply, assessment, final_: true, .. } if *ply == of => Some(*assessment),
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn the_mating_move_gets_its_badge_at_once() {
+        let engine = engine();
+        let mut core = Core::new(Notation::Russian, Thresholds::default());
+        let mut game = start(&mut core, &engine, Chess::default());
+        for mv in ["e2e4", "e7e5", "f1c4", "b8c6", "d1h5", "g8f6"] {
+            game = play(&mut core, &engine, &game, mv).0;
+        }
+        analysed(&mut core, &game, 20, Score::Mate(1), "h5f7");
+        let (game, events) = play(&mut core, &engine, &game, "h5f7");
+        assert!(game.current().is_checkmate());
+        let mate = assessment(&events, 7).expect("the mate is assessed without an engine");
+        assert_eq!(mate.class, MoveClass::Best);
+        assert!(core.current.is_none(), "nothing is left to analyse");
+    }
+
+    #[test]
+    fn stalemating_a_won_game_is_called_out() {
+        let engine = engine();
+        let mut core = Core::new(Notation::Russian, Thresholds::default());
+        let position = "7k/8/8/6Q1/8/8/8/6K1 w - - 0 60"
+            .parse::<Fen>()
+            .unwrap()
+            .into_position::<Chess>(CastlingMode::Standard)
+            .unwrap();
+        let game = start(&mut core, &engine, position);
+        analysed(&mut core, &game, 24, Score::Mate(2), "g5d8");
+        let (game, events) = play(&mut core, &engine, &game, "g5g6");
+        assert!(game.current().is_stalemate());
+        let stalemate = assessment(&events, 1).expect("a stalemate is assessed");
+        assert_eq!(stalemate.class, MoveClass::Blunder);
+        assert!(stalemate.missed_win);
+        let hint = events.iter().find_map(|event| match event {
+            Event::Hint(hint) if hint.kind == HintKind::Blunder => Some(hint.text.clone()),
+            _ => None,
+        });
+        assert_eq!(
+            hint.as_deref(),
+            Some("60.Фg6?? — зевок: оценка #2 → 0.00, выигрыш упущен. Сильнее 60.Фd8+")
+        );
+    }
+
+    #[test]
+    fn two_moves_at_once_are_analysed_once() {
+        let engine = engine();
+        let mut core = Core::new(Notation::Russian, Thresholds::default());
+        let game = start(&mut core, &engine, Chess::default());
+        let (game, _) = play(&mut core, &engine, &game, "e2e4");
+        let first = core.current;
+        // Второе событие о той же партии — трекер нашёл два хода разом.
+        let change = GameEvent::Moved { ply: 1, mv: game.plies()[0].mv, san: game.plies()[0].san };
+        core.game_changed(Arc::clone(&game), &change, &engine, &mut Vec::new());
+        assert_eq!(core.current, first);
     }
 }
