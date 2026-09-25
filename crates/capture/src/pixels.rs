@@ -1,11 +1,11 @@
 //! Пиксели захваченного окна: область доски в пикселях и уменьшение кадра.
 //!
-//! ScreenCaptureKit вырезает и масштабирует кадр сам, Windows.Graphics.Capture
-//! отдаёт окно целиком и в полном размере — это делается здесь. Системных API
-//! тут нет, поэтому всё проверяется тестами на любой системе.
+//! ScreenCaptureKit вырезает и масштабирует кадр сам, а Windows.Graphics.Capture,
+//! PipeWire и X11 отдают окно в полном размере — это делается здесь.
+//! Системных API тут нет, поэтому всё проверяется тестами на любой системе.
 
-// Нужно только захвату на Windows; тесты идут везде.
-#![cfg_attr(not(target_os = "windows"), allow(dead_code))]
+// Нужно только захвату на Windows и Linux; тесты идут везде.
+#![cfg_attr(not(any(target_os = "windows", target_os = "linux")), allow(dead_code))]
 
 use crate::RegionF;
 
@@ -16,6 +16,16 @@ pub(crate) struct PixelBox {
     pub y: u32,
     pub width: u32,
     pub height: u32,
+}
+
+impl PixelBox {
+    /// Прямоугольник целиком внутри этого.
+    pub fn contains(&self, other: &PixelBox) -> bool {
+        other.x >= self.x
+            && other.y >= self.y
+            && other.x + other.width <= self.x + self.width
+            && other.y + other.height <= self.y + self.height
+    }
 }
 
 /// Область окна в пикселях: границы округляются наружу, чтобы край доски

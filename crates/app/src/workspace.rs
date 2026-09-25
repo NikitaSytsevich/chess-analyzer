@@ -643,10 +643,9 @@ impl Workspace {
     /// кнопок не сжимается никогда.
     fn title_bar(&self, compact: bool, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
         let live = matches!(self.phase, Phase::Live);
-        // Кнопки окна: на macOS «светофор» слева, на Windows — справа.
-        let controls = platform::TITLE_CONTROLS_LEFT
-            + platform::TITLE_CONTROLS_RIGHT
-            + if window.is_fullscreen() { 12.0 } else { 0.0 };
+        // Кнопки окна: на macOS «светофор» слева, на Windows и Linux — справа.
+        let (left, right) = platform::title_controls(window);
+        let controls = left + right + if window.is_fullscreen() { 12.0 } else { 0.0 };
         let width = (window.viewport_size().width - px(controls)).max(px(0.));
         let status = match self.phase {
             Phase::Live if compact => self.title_score().into_any_element(),

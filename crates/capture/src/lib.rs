@@ -6,6 +6,7 @@
 //!
 //! - macOS — ScreenCaptureKit ([`macos`]);
 //! - Windows — Windows.Graphics.Capture ([`windows`]);
+//! - Linux — портал рабочего стола и PipeWire, а без портала — X11 ([`linux`]);
 //! - остальные — заглушка: выбор окна недоступен, всё остальное приложение
 //!   работает.
 //!
@@ -13,10 +14,12 @@
 //! распознавание никогда не отстаёт от трансляции.
 
 mod config;
+#[cfg(target_os = "linux")]
+mod linux;
 #[cfg(target_os = "macos")]
 mod macos;
 mod pixels;
-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+#[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
 mod unsupported;
 #[cfg(target_os = "windows")]
 mod windows;
@@ -25,9 +28,11 @@ mod windows;
 pub use self::windows::{CaptureSession, Source, pick_source};
 pub use analyzer_vision::FrameSlot;
 pub use config::{CaptureConfig, CaptureStats, RegionF};
+#[cfg(target_os = "linux")]
+pub use linux::{CaptureSession, Source, pick_source};
 #[cfg(target_os = "macos")]
 pub use macos::{CaptureSession, Source, pick_source};
-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+#[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
 pub use unsupported::{CaptureSession, Source, pick_source};
 
 /// Ошибка захвата, понятная без знания системных API.

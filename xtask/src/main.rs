@@ -66,8 +66,20 @@ fn stockfish_asset() -> Result<StockfishAsset> {
             sha256: "8372ad3f0d7276deb2c70f801f541ec7db463219fc6d9c7592864e542aa4f401",
             megabytes: 77,
         }
+    } else if cfg!(all(target_os = "linux", target_arch = "x86_64")) {
+        StockfishAsset {
+            archive: "stockfish-linux-x86-64-universal.tar.gz",
+            sha256: "9defc0d4e55d49c65a6d042f3e571a39fcea499ade6dbe741b53b8c65e03611f",
+            megabytes: 78,
+        }
+    } else if cfg!(all(target_os = "linux", target_arch = "aarch64")) {
+        StockfishAsset {
+            archive: "stockfish-linux-arm64-universal.tar.gz",
+            sha256: "fe26cfd1d9db4c8af3d21e24d9ff34cacb31c1f940085a7583da11796f2bac01",
+            megabytes: 77,
+        }
     } else {
-        bail!("сборка Stockfish для этой системы не выбрана — нужна macOS или Windows")
+        bail!("сборка Stockfish для этой системы не выбрана — нужны macOS, Windows или Linux")
     })
 }
 

@@ -20,6 +20,11 @@ use gpui_kit::*;
 use crate::assets::AppAssets;
 use crate::workspace::Workspace;
 
+/// Имя приложения для рабочего стола Linux: по нему окно находит свой ярлык
+/// `.desktop` (иконку и название в панели задач). То же, что `BUNDLE_ID` в
+/// упаковке.
+const APP_ID: &str = "by.sytsevich.chess-analyzer";
+
 fn main() {
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -41,6 +46,12 @@ fn main() {
             window_bounds: Some(WindowBounds::centered(size(px(1280.), px(820.)), cx)),
             // Узкое окно — доска со шкалой рядом с трансляцией, панель прячется сама.
             window_min_size: Some(size(px(340.), px(400.))),
+            // Linux: заголовок рисуем сами, как на macOS и Windows, — с
+            // индикаторами и кнопками. Где оконный менеджер этого не умеет,
+            // он нарисует свою рамку, и кнопки окна будут на ней.
+            window_decorations: Some(WindowDecorations::Client),
+            app_id: Some(APP_ID.to_owned()),
+            icon: window_icon(),
             ..TitleBar::window_options()
         };
         cx.open_window(options, move |window, cx| {
@@ -57,4 +68,20 @@ fn main() {
         .expect("failed to open the main window");
         cx.activate(true);
     });
+}
+
+/// Иконка окна для X11 (на Wayland и других системах иконку окну даёт
+/// ярлык приложения или сама программа).
+fn window_icon() -> Option<std::sync::Arc<image::RgbaImage>> {
+    if !cfg!(target_os = "linux") {
+        return None;
+    }
+    let png = include_bytes!("../../../assets/icon/icon.png");
+    match image::load_from_memory_with_format(png, image::ImageFormat::Png) {
+        Ok(icon) => Some(std::sync::Arc::new(icon.into_rgba8())),
+        Err(error) => {
+            tracing::warn!(%error, "window icon");
+            None
+        }
+    }
 }
