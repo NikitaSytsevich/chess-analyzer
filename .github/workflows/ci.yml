@@ -1,5 +1,5 @@
-# Проверки и сборка под Windows. macOS проверяется на машине разработки
-# (`cargo xtask ci`): минуты macOS в Actions в десять раз дороже.
+# Проверки и сборка под Windows и Linux. macOS проверяется на машине
+# разработки (`cargo xtask ci`): минуты macOS в Actions в десять раз дороже.
 name: CI
 
 on:
@@ -46,4 +46,52 @@ jobs:
         with:
           name: chess-analyzer-windows-x64
           path: target/release/Шахматный анализатор/
+          if-no-files-found: error
+
+  linux:
+    name: Linux — проверки и сборка
+    # Ubuntu 22.04, а не новее: программа, собранная с её glibc 2.35,
+    # запускается и на системах постарше самых свежих.
+    runs-on: ubuntu-22.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      # Окно GPUI (xkbcommon, xcb, Wayland, Vulkan, шрифты) и захват через
+      # PipeWire; clang — для привязок к PipeWire.
+      - name: Библиотеки для сборки
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libxkbcommon-dev libxkbcommon-x11-dev libxcb1-dev libwayland-dev \
+            libvulkan-dev libfontconfig-dev libfreetype-dev \
+            libpipewire-0.3-dev libclang-dev clang
+
+      - name: Rust из rust-toolchain.toml
+        run: rustup toolchain install
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Форматирование
+        run: cargo fmt --all --check
+
+      - name: Clippy без предупреждений
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Тесты
+        run: cargo test --workspace
+
+      - name: Сборка приложения
+        run: cargo xtask bundle --release
+
+      # Артефакт GitHub упаковывает в zip и теряет права на запуск — tar их
+      # сохраняет.
+      - name: Архив папки приложения
+        run: tar -czf chess-analyzer-linux-x64.tar.gz -C target/release "Шахматный анализатор"
+
+      - name: Папка приложения
+        uses: actions/upload-artifact@v4
+        with:
+          name: chess-analyzer-linux-x64
+          path: chess-analyzer-linux-x64.tar.gz
           if-no-files-found: error
