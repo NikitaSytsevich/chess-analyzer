@@ -205,7 +205,22 @@ fn badge_views(badge: Badge, side: f32, white_bottom: bool) -> Vec<AnyElement> {
         );
     }
 
-    let glyph = svg().path(class_icon(badge.class)).w(relative(0.66)).h(relative(0.66)).text_color(white());
+    // Знак рисуется сразу в полный размер, а выскакивает вместе с кружком
+    // преобразованием масштаба: SVG растрируется один раз, а не на каждом
+    // кадре анимации — и не в нулевой размер, которого не бывает.
+    let glyph = svg()
+        .path(class_icon(badge.class))
+        .flex_shrink_0()
+        .size(px(d * 0.66))
+        .text_color(white())
+        .with_animation(
+            element_id(format!("glyph-{key}")),
+            Animation::new(POP).with_easing(back_out),
+            |glyph, t| {
+                let scale = t.max(0.01);
+                glyph.with_transformation(Transformation::scale(size(scale, scale)))
+            },
+        );
     let mut shadows = vec![BoxShadow {
         color: hsla(0.0, 0.0, 0.0, 0.35),
         offset: point(px(0.0), px(1.5)),
