@@ -67,6 +67,32 @@ jobs:
             libvulkan-dev libfontconfig-dev libfreetype-dev \
             libpipewire-0.3-dev libclang-dev clang
 
+      # Заголовки PipeWire 0.3.48 из Ubuntu 22.04 старше, чем нужно привязкам
+      # pipewire-rs, — берём заголовки 1.0.5 из Ubuntu 24.04. Библиотека при
+      # этом остаётся системной, 0.3.48: сборка с ней не пройдёт, если
+      # программа позовёт то, чего в старом PipeWire нет.
+      - name: Заголовки PipeWire 1.0
+        run: |
+          dir="$RUNNER_TEMP/pipewire"
+          pool=http://archive.ubuntu.com/ubuntu/pool/main/p/pipewire
+          mkdir -p "$dir/pkgconfig"
+          while read -r package sha256; do
+            curl -fsSLo "$dir/$package.deb" "$pool/${package}_1.0.5-1_amd64.deb"
+            echo "$sha256  $dir/$package.deb" | sha256sum -c -
+            dpkg-deb -x "$dir/$package.deb" "$dir/root"
+          done <<'EOF'
+          libspa-0.2-dev 6c99d162e23e13cacf8bc3edc312c60545281078398e52e34dc5ebb4209649dc
+          libpipewire-0.3-dev c0b34ed6a34391a94c0711966dbea9b6b5a98758d88813824c05d6662e0b60c9
+          EOF
+          libdir=$(pkg-config --variable=libdir libpipewire-0.3)
+          for pc in libspa-0.2 libpipewire-0.3; do
+            sed -e "s|^includedir=.*|includedir=$dir/root/usr/include|" \
+                -e "s|^libdir=.*|libdir=$libdir|" \
+                "$dir/root/usr/lib/x86_64-linux-gnu/pkgconfig/$pc.pc" > "$dir/pkgconfig/$pc.pc"
+          done
+          echo "PKG_CONFIG_PATH=$dir/pkgconfig" >> "$GITHUB_ENV"
+          PKG_CONFIG_PATH="$dir/pkgconfig" pkg-config --cflags --libs libpipewire-0.3
+
       - name: Rust из rust-toolchain.toml
         run: rustup toolchain install
 

@@ -237,7 +237,8 @@ cd "Шахматный анализатор"
 <details>
 <summary>Сборка из исходников</summary>
 
-Ubuntu и Debian:
+Ubuntu 24.04+ и Debian 13+ — сборке нужны заголовки PipeWire 1.0 или
+новее (на Ubuntu 22.04 проще скачать готовую сборку, она там работает):
 
 ```sh
 sudo apt install build-essential git curl pkg-config clang libclang-dev \
