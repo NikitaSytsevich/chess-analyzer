@@ -19,7 +19,9 @@ pub(crate) struct PixelBox {
 }
 
 impl PixelBox {
-    /// Прямоугольник целиком внутри этого.
+    /// Прямоугольник целиком внутри этого. Нужно выдаче кадров на Linux:
+    /// источник мог прислать не всё окно, а только область доски.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub fn contains(&self, other: &PixelBox) -> bool {
         other.x >= self.x
             && other.y >= self.y
