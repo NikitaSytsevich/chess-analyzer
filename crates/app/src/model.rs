@@ -349,6 +349,7 @@ mod tests {
                     rect: WindowRect { x, y: 10.0, width: 400.0, height: 400.0 },
                     window: Some((1280.0, 800.0)),
                 }),
+                window: Some((1280.0, 800.0)),
             })
         };
         let mut model = Model::default();

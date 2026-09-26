@@ -217,6 +217,12 @@ impl Recognizer {
         };
         let palette = self.palette.ok_or(VisionError::NoBoard)?;
         let scan = scan(frame, &grid);
+        // Доска ещё на месте? Страница могла смениться другой — ошибкой сети,
+        // заставкой, — и её ровные клетки читались бы уверенно, как пустая
+        // доска: стрелки поверх трансляции повисли бы над пустым местом.
+        if matching_cells(&scan, palette) < STILL_BOARD {
+            return Err(VisionError::NoBoard);
+        }
 
         if self.active.is_none() {
             self.choose_set(&scan);
@@ -328,14 +334,26 @@ fn palette_for(frame: &Frame, grid: &Grid) -> Option<Palette> {
             &(0..64).filter(|&i| Scan::is_light(i) == light).map(|i| scan.backgrounds[i]).collect::<Vec<_>>(),
         )
     };
-    let (light, dark) = (parity(true), parity(false));
-    let matching = (0..64)
-        .filter(|&i| scan.backgrounds[i].distance(if Scan::is_light(i) { light } else { dark }) < HIGHLIGHT)
-        .count();
+    let palette = Palette { light: parity(true), dark: parity(false) };
     // Подсвечены бывают последний ход, шах и предварительный ход — до пяти
     // клеток. Сетка, сдвинутая на клетку, захватывает целый ряд страницы —
     // восемь чужих клеток — и здесь отсеивается.
-    (light.distance(dark) >= 18.0 && matching >= 57).then_some(Palette { light, dark })
+    (palette.light.distance(palette.dark) >= 18.0 && matching_cells(&scan, palette) >= 57).then_some(palette)
+}
+
+/// Столько клеток найденной доски должны быть цвета своего поля на каждом
+/// кадре, иначе на её месте уже не доска. Найти доску строже (57 из 64):
+/// здесь запас на выделенные комментатором клетки и сжатие видео.
+const STILL_BOARD: usize = 48;
+
+/// Сколько клеток цвета своего поля.
+fn matching_cells(scan: &Scan, palette: Palette) -> usize {
+    (0..64)
+        .filter(|&i| {
+            let base = if Scan::is_light(i) { palette.light } else { palette.dark };
+            scan.backgrounds[i].distance(base) < HIGHLIGHT
+        })
+        .count()
 }
 
 /// Первый кандидат сетки, который действительно доска.

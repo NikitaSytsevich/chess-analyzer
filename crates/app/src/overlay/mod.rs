@@ -4,12 +4,13 @@
 //! трансляции, фокус оно не забирает, в панели задач и в переключении окон
 //! его нет.
 //!
-//! Окно стрелок стоит в порядке окон прямо над окном трансляции, а не
-//! поверх всех окон: окно, которое закрывает трансляцию, закрывает и
-//! стрелки. Оно следует за окном трансляции, когда его двигают, и прячется,
-//! когда его не видно (свёрнуто, на другом рабочем столе), когда доску не
-//! видит распознавание, когда анализ на паузе и когда окно трансляции
-//! изменило размер, — пока распознавание не найдёт доску заново.
+//! Окно стрелок держится над окном трансляции, но не над другими окнами:
+//! окно, которое закрывает доску трансляции, закрывает и стрелки, а щелчок
+//! по самой трансляции и свёрнутый анализатор их не прячут. Оно следует за
+//! окном трансляции, когда его двигают, и прячется, когда его не видно
+//! (свёрнуто, на другом рабочем столе), когда доску не видит распознавание,
+//! когда анализ на паузе и когда окно трансляции изменило размер, — пока
+//! распознавание не найдёт доску заново.
 //!
 //! Место доски на экране — место окна трансляции (его сообщает система)
 //! плюс место доски на окне (его находит распознавание на кадрах захвата,
@@ -110,6 +111,8 @@ pub fn open(cx: &mut App) -> anyhow::Result<Follower> {
         shown: false,
         greet: true,
         failing: false,
+        unplaced: None,
+        wanted: false,
     })
 }
 
@@ -135,6 +138,11 @@ pub struct Follower {
     greet: bool,
     /// Система отказала в показе — сказано в журнал, повторять не нужно.
     failing: bool,
+    /// Доска прочитана, но на экран не легла: что сообщила система об окне
+    /// трансляции и на окне какого размера доску видели. Сказано в журнал.
+    unplaced: Option<(TargetState, Option<(f32, f32)>)>,
+    /// Есть ли что показать (доска прочитана, анализ идёт) — для журнала.
+    wanted: bool,
 }
 
 impl Follower {
@@ -149,6 +157,10 @@ impl Follower {
     /// сдвигает за окном трансляции или прячет. Возвращает, когда сверить
     /// снова. Вызывать вне обновлений GPUI (см. [`Follower`]).
     pub fn follow(&mut self, want: Option<Want>, cx: &mut AsyncApp) -> Duration {
+        if want.is_some() != self.wanted {
+            self.wanted = want.is_some();
+            tracing::debug!(wanted = self.wanted, "arrows over the broadcast");
+        }
         let located = want.and_then(|want| Some((self.locate(&want)?, want)));
         let Some((rect, want)) = located else {
             self.hide();
@@ -186,10 +198,18 @@ impl Follower {
             self.greet = true;
         }
         let Some((_, Some(target))) = self.target.as_mut() else { return None };
-        match target.poll() {
+        let state = target.poll(want.board.window);
+        let placed = match state {
             TargetState::Visible(window) => place::board_on_screen(window, &want.board),
             TargetState::Hidden | TargetState::Gone => None,
+        };
+        // Почему стрелок нет, хотя доска прочитана, — в журнал, по разу.
+        let unplaced = placed.is_none().then_some((state, want.board.window));
+        if unplaced.is_some() && unplaced != self.unplaced {
+            tracing::debug!(?state, board = ?want.board, "the board is read but not placed on the screen");
         }
+        self.unplaced = unplaced;
+        placed
     }
 
     fn hide(&mut self) {

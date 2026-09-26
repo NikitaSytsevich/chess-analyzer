@@ -14,6 +14,9 @@ pub(crate) enum VisionControl {
     /// Доска на кадре сместилась или сменилась: искать заново и начать
     /// партию с того, что видно.
     Relocate,
+    /// Кадры показывают другую часть окна: искать доску заново, а партию
+    /// вести дальше.
+    Reframe,
     SetPosition(Chess),
     Stop,
 }
@@ -37,6 +40,9 @@ pub struct RecognitionStatus {
     pub observation: Option<Arc<Observation>>,
     /// Где эта доска на окне трансляции — если кадр из окна.
     pub board: Option<BoardOnWindow>,
+    /// Размер окна трансляции на последнем кадре — даже если доски на нём
+    /// нет; `None` — захват за размером окна не следит.
+    pub window: Option<(f32, f32)>,
 }
 
 /// Где доска на окне трансляции: по этому месту стрелки ложатся поверх неё.
@@ -52,6 +58,8 @@ pub struct BoardOnWindow {
 
 /// Статус уходит интерфейсу не чаще пяти раз в секунду.
 const STATUS_INTERVAL: Duration = Duration::from_millis(200);
+/// Столько ждать нового кадра, прежде чем проверить команды.
+const FRAME_WAIT: Duration = Duration::from_millis(250);
 /// Столько кадров подряд без доски — и прежнее положение доски забывается.
 const LOST_FRAMES: u32 = 10;
 
@@ -66,6 +74,11 @@ pub(crate) fn run(
     let mut seen = 0;
     let mut misses = 0;
     let mut last_status = Instant::now() - STATUS_INTERVAL;
+    // Статус последнего кадра, если он ещё не ушёл: кадры приходили чаще,
+    // чем уходят статусы. Уйти он должен, даже если кадров больше не будет:
+    // Windows и macOS присылают кадр, только когда окно изменилось, и доска,
+    // сменившаяся неподвижной страницей, иначе так и считалась бы видной.
+    let mut pending: Option<RecognitionStatus> = None;
     loop {
         for command in control.try_iter() {
             match command {
@@ -86,6 +99,10 @@ pub(crate) fn run(
                     tracker.reset();
                     tracker.lock_orientation(false);
                 }
+                VisionControl::Reframe => {
+                    misses = 0;
+                    recognizer.forget_grid();
+                }
                 VisionControl::SetPosition(position) => {
                     let change = tracker.set_position(position);
                     if let Some(game) = tracker.game() {
@@ -94,7 +111,15 @@ pub(crate) fn run(
                 }
             }
         }
-        let Some((seq, frame)) = slot.wait_newer(seen, Duration::from_millis(250)) else {
+        let wait = match pending {
+            Some(_) => STATUS_INTERVAL.saturating_sub(last_status.elapsed()),
+            None => FRAME_WAIT,
+        };
+        let Some((seq, frame)) = slot.wait_newer(seen, wait) else {
+            if let Some(status) = pending.take() {
+                last_status = Instant::now();
+                let _ = output.send(VisionOutput::Status(status));
+            }
             continue;
         };
         seen = seq;
@@ -142,18 +167,86 @@ pub(crate) fn run(
                 }
             }
         }
+        let status = RecognitionStatus {
+            board_found: observation.is_some(),
+            mean_confidence: observation.as_ref().map_or(0.0, |o| o.mean_confidence),
+            set: recognizer.active_set().map(str::to_owned),
+            orientation: recognizer.orientation(),
+            frame_time: started.elapsed(),
+            observation: observation.map(Arc::new),
+            board,
+            window: frame.source().and_then(|source| source.window),
+        };
         if last_status.elapsed() >= STATUS_INTERVAL {
             last_status = Instant::now();
-            let status = RecognitionStatus {
-                board_found: observation.is_some(),
-                mean_confidence: observation.as_ref().map_or(0.0, |o| o.mean_confidence),
-                set: recognizer.active_set().map(str::to_owned),
-                orientation: recognizer.orientation(),
-                frame_time: started.elapsed(),
-                observation: observation.map(Arc::new),
-                board,
-            };
+            pending = None;
             let _ = output.send(VisionOutput::Status(status));
+        } else {
+            pending = Some(status);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    use analyzer_chess::{Chess, Position as _};
+    use analyzer_tracker::TrackerConfig;
+    use analyzer_vision::synth::{Style, render};
+    use analyzer_vision::{Frame, FrameSlot};
+
+    use super::{RecognitionStatus, VisionControl, VisionOutput, run};
+
+    /// Доска сменилась неподвижной страницей — кадр без доски пришёл сразу за
+    /// кадром с доской, и новых кадров больше нет (окно не меняется). Статус
+    /// «доски нет» всё равно доходит: иначе стрелки поверх трансляции так и
+    /// висели бы над страницей без доски.
+    #[test]
+    fn the_last_frame_is_reported_even_if_no_frame_follows() {
+        let slot = Arc::new(FrameSlot::new());
+        let (control, commands) = flume::unbounded();
+        let (output, statuses) = flume::unbounded();
+        let vision = {
+            let slot = Arc::clone(&slot);
+            std::thread::spawn(move || run(slot, TrackerConfig::default(), commands, output))
+        };
+
+        let board = render(Chess::default().board(), &Style::lichess("cburnett"), &[]);
+        let (width, height) = (board.width(), board.height());
+        slot.put(board);
+        // Первый кадр разбирается долго: распознаватель ищет доску и набор фигур.
+        wait_for(&statuses, Duration::from_secs(10), seen, "the board is seen");
+        // Страница без доски — сразу следом, раньше, чем уйдёт следующий статус.
+        slot.put(Frame::new(width, height, vec![30; (width * height * 4) as usize], Instant::now()));
+        wait_for(&statuses, Duration::from_secs(1), |status| !seen(status), "the board is reported gone");
+
+        control.send(VisionControl::Stop).unwrap();
+        vision.join().unwrap();
+    }
+
+    /// Доска прочитана уверенно — так, что интерфейс кладёт на неё стрелки.
+    fn seen(status: &RecognitionStatus) -> bool {
+        status.board_found && status.mean_confidence > 0.6
+    }
+
+    /// Ждёт статус, для которого `wanted` истинно. Паникует, если за `time`
+    /// такого нет.
+    fn wait_for(
+        statuses: &flume::Receiver<VisionOutput>,
+        time: Duration,
+        wanted: impl Fn(&RecognitionStatus) -> bool,
+        what: &str,
+    ) {
+        let deadline = Instant::now() + time;
+        while let Ok(output) = statuses.recv_deadline(deadline) {
+            if let VisionOutput::Status(status) = output
+                && wanted(&status)
+            {
+                return;
+            }
+        }
+        panic!("{what}: no such status within {time:?}");
     }
 }

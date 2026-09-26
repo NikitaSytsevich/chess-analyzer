@@ -25,6 +25,13 @@ impl ScreenRect {
         let bottom = (self.y + self.height).round();
         (left as i32, top as i32, (right - left).max(1.0) as u32, (bottom - top).max(1.0) as u32)
     }
+
+    /// Того же размера, что окно на кадре захвата, — с допуском на
+    /// округление границ окна у системы и у захвата.
+    pub fn fits(self, (width, height): (f32, f32)) -> bool {
+        let same = |now: f64, then: f32| (now - f64::from(then)).abs() <= (now * 0.01).max(3.0);
+        same(self.width, width) && same(self.height, height)
+    }
 }
 
 /// Что система знает об окне трансляции прямо сейчас.
@@ -45,12 +52,8 @@ pub enum TargetState {
 /// меняется, и стрелки легли бы мимо доски; распознавание найдёт её на
 /// следующем кадре, тогда стрелки и вернутся.
 pub fn board_on_screen(window: ScreenRect, board: &BoardOnWindow) -> Option<ScreenRect> {
-    if let Some((width, height)) = board.window {
-        // Допуск — на округление границ окна у системы и у захвата.
-        let same = |now: f64, then: f32| (now - f64::from(then)).abs() <= (now * 0.01).max(3.0);
-        if !same(window.width, width) || !same(window.height, height) {
-            return None;
-        }
+    if board.window.is_some_and(|captured| !window.fits(captured)) {
+        return None;
     }
     let rect = board.rect;
     if rect.width < 16.0 || rect.height < 16.0 {
@@ -62,6 +65,16 @@ pub fn board_on_screen(window: ScreenRect, board: &BoardOnWindow) -> Option<Scre
         width: f64::from(rect.width),
         height: f64::from(rect.height),
     })
+}
+
+/// Границы окна, которые снял захват: видимые `visible` или вместе с
+/// невидимой рамкой `whole` (Windows), — те, что по размеру ближе к окну на
+/// кадре `captured`. Поровну или размер кадра неизвестен — видимые.
+pub fn closest(visible: ScreenRect, whole: Option<ScreenRect>, captured: Option<(f32, f32)>) -> ScreenRect {
+    let (Some(whole), Some((width, height))) = (whole, captured) else { return visible };
+    let off =
+        |rect: ScreenRect| (rect.width - f64::from(width)).abs() + (rect.height - f64::from(height)).abs();
+    if off(whole) < off(visible) { whole } else { visible }
 }
 
 /// Сверять место окна трансляции так часто, пока оно двигается: стрелки не
@@ -116,6 +129,32 @@ mod tests {
         // Размер окна захват не знает (macOS) — место доски в точках от него
         // не зависит.
         assert!(board_on_screen(wider, &board(None)).is_some());
+    }
+
+    #[test]
+    fn the_window_is_placed_by_the_bounds_the_capture_took() {
+        // Окно браузера на Windows: видимые границы и вместе с невидимой
+        // рамкой (7 пикселей слева, справа и снизу).
+        let visible = ScreenRect { x: 7.0, y: 0.0, width: 1136.0, height: 993.0 };
+        let whole = ScreenRect { x: 0.0, y: 0.0, width: 1150.0, height: 1000.0 };
+        assert_eq!(closest(visible, Some(whole), Some((1136.0, 993.0))), visible);
+        // После полноэкранного режима захват снимает окно вместе с рамкой —
+        // доска на кадре на 7 пикселей правее, и начало окна — с рамкой.
+        assert_eq!(closest(visible, Some(whole), Some((1150.0, 1000.0))), whole);
+        let board = BoardOnWindow {
+            rect: WindowRect { x: 29.0, y: 186.0, width: 672.0, height: 672.0 },
+            window: Some((1150.0, 1000.0)),
+        };
+        let placed = board_on_screen(closest(visible, Some(whole), board.window), &board).unwrap();
+        assert_eq!((placed.x, placed.y), (29.0, 186.0));
+        // На широком окне разница в рамку меньше допуска на округление — и
+        // всё равно выбираются границы ближе к кадру.
+        let wide = ScreenRect { x: 7.0, y: 0.0, width: 2546.0, height: 1393.0 };
+        let wide_whole = ScreenRect { x: 0.0, y: 0.0, width: 2560.0, height: 1400.0 };
+        assert!(wide.fits((2560.0, 1400.0)));
+        assert_eq!(closest(wide, Some(wide_whole), Some((2560.0, 1400.0))), wide_whole);
+        // Размер кадра неизвестен — видимые границы.
+        assert_eq!(closest(visible, Some(whole), None), visible);
     }
 
     #[test]

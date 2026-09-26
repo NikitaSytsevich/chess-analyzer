@@ -11,6 +11,7 @@ mod model;
 mod overlay;
 mod pieces;
 mod platform;
+mod refind;
 mod theme;
 mod views;
 mod workspace;

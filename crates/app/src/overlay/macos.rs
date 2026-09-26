@@ -54,7 +54,9 @@ impl Target {
         Ok(Self { id: u32::try_from(window.0).context("не номер окна CoreGraphics")? })
     }
 
-    pub fn poll(&mut self) -> TargetState {
+    /// `_captured` — размер окна на кадре захвата: на macOS место окна
+    /// одно, выбирать не из чего (см. `windows::Target::poll`).
+    pub fn poll(&mut self, _captured: Option<(f32, f32)>) -> TargetState {
         let Some(window) = windows(CGWindowListOption::OptionIncludingWindow, self.id)
             .into_iter()
             .find(|window| window.number == self.id)

@@ -33,6 +33,7 @@ use crate::model::{self, Model};
 use crate::overlay::{self, Scene, Want};
 use crate::pieces::PieceImages;
 use crate::platform::{self, Unpinned};
+use crate::refind;
 use crate::theme::{self, Palette, hex, hexa};
 use crate::views::analysis::{BAR, CAPTION, Reading, caption, ending_text, eval_bar, verdict};
 use crate::views::board::{Badge, BoardProps, board};
@@ -136,6 +137,12 @@ struct Placing {
     drag_from: Option<(f32, f32)>,
 }
 
+/// Поиск потерянной доски во всём окне трансляции.
+struct Wide {
+    seen: u64,
+    searching: bool,
+}
+
 enum Phase {
     Welcome,
     Picking,
@@ -178,6 +185,11 @@ pub struct Workspace {
     bar_moved: Instant,
     capture_fps: f32,
     frames_seen: u64,
+    /// Не потерялась ли доска (см. `refind`).
+    watch: refind::Watch,
+    /// Доска потерялась, и захват ищет её во всём окне трансляции: номер
+    /// последнего просмотренного кадра и идёт ли поиск на нём.
+    wide: Option<Wide>,
     notice: Option<SharedString>,
     /// Когда погасить уведомление; `None` — висит, пока причина не уйдёт.
     notice_until: Option<Instant>,
@@ -242,6 +254,7 @@ impl Workspace {
                 ticks += 1;
                 let alive = this.update_in(cx, |this, window, cx| {
                     this.poll_setup(window, cx);
+                    this.watch_board(cx);
                     if this.notice_until.is_some_and(|until| Instant::now() >= until) {
                         this.notice = None;
                         this.notice_until = None;
@@ -293,6 +306,8 @@ impl Workspace {
             bar_moved: Instant::now(),
             capture_fps: 0.0,
             frames_seen: 0,
+            watch: refind::Watch::default(),
+            wide: None,
             notice,
             notice_until: None,
         }
@@ -431,6 +446,7 @@ impl Workspace {
                                 fit_placing(window);
                             }
                             Err(error) => {
+                                tracing::warn!(%error, "capture did not start");
                                 this.phase = Phase::Welcome;
                                 this.warn(format!("Не удалось начать захват: {error}"), cx);
                             }
@@ -513,27 +529,100 @@ impl Workspace {
     /// Доска выбрана: захват сужается до неё, кадры идут распознаванию.
     fn confirm_board(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Phase::Placing(placing) = &self.phase else { return };
-        let (Some(board), Some(frame), Some(capture)) = (placing.board, &placing.frame, &self.capture) else {
+        let (Some(board), Some(frame), Some(_)) = (placing.board, &placing.frame, &self.capture) else {
             return;
         };
-        let (width, height) = (frame.width() as f64, frame.height() as f64);
-        let region = RegionF {
-            x: f64::from(board.x) / width,
-            y: f64::from(board.y) / height,
-            width: f64::from(board.side) / width,
-            height: f64::from(board.side) / height,
-        }
-        .with_margin(0.06);
-        let config = CaptureConfig { fps: 10, region: Some(region), ..capture.config() };
-        if let Err(error) = capture.reconfigure(config) {
+        let region = board_region(frame, board);
+        if let Err(error) = self.narrow(region) {
             self.warn(format!("Не удалось настроить захват: {error}"), cx);
             return;
         }
-        capture.set_target(Arc::clone(&self.session_slot));
         self.relocate();
         self.phase = Phase::Live;
         self.fit_live(window);
         cx.notify();
+    }
+
+    /// Захват — только доска с запасом `region`, кадры — распознаванию.
+    fn narrow(&mut self, region: RegionF) -> Result<(), CaptureError> {
+        let Some(capture) = &self.capture else { return Ok(()) };
+        capture.reconfigure(CaptureConfig { fps: 10, region: Some(region), ..capture.config() })?;
+        capture.set_target(Arc::clone(&self.session_slot));
+        self.watch = refind::Watch::narrowed(Instant::now());
+        self.wide = None;
+        Ok(())
+    }
+
+    /// Не потерялась ли доска; потерялась — ищется во всём окне трансляции,
+    /// а найдётся — захват снова сужается до неё (см. `refind`).
+    fn watch_board(&mut self, cx: &mut Context<Self>) {
+        if !matches!(self.phase, Phase::Live) || self.capture.is_none() {
+            self.wide = None;
+            return;
+        }
+        if self.wide.is_some() {
+            self.search_wide(cx);
+        } else if self.watch.lost(self.model.recognition.as_ref(), Instant::now()) {
+            self.widen(cx);
+        }
+    }
+
+    /// Захват — на всё окно трансляции, кадры — поиску доски.
+    fn widen(&mut self, cx: &mut Context<Self>) {
+        let Some(capture) = &self.capture else { return };
+        let config = CaptureConfig { fps: 4, region: None, ..capture.config() };
+        if let Err(error) = capture.reconfigure(config) {
+            tracing::warn!(%error, "capture could not widen to the whole window");
+            return;
+        }
+        tracing::info!("board lost, searching the whole window");
+        let seen = self.setup_slot.latest().map_or(0, |(seq, _)| seq);
+        capture.set_target(Arc::clone(&self.setup_slot));
+        // Прежнее место доски на окне больше ничего не значит: стрелки
+        // вернутся, когда её прочитают на новом.
+        self.model.forget_board();
+        self.wide = Some(Wide { seen, searching: false });
+        cx.notify();
+    }
+
+    /// Поиск доски на свежем кадре всего окна — в фоне, по одному кадру за
+    /// раз. Нашлась — захват сужается до неё, а распознавание ищет её на
+    /// новых кадрах, не начиная партию заново.
+    fn search_wide(&mut self, cx: &mut Context<Self>) {
+        let Some(wide) = &mut self.wide else { return };
+        let Some((seq, frame)) = self.setup_slot.latest() else { return };
+        if wide.searching || seq <= wide.seen {
+            return;
+        }
+        wide.seen = seq;
+        wide.searching = true;
+        let task = cx.background_executor().spawn(async move {
+            let (grid, _) = find_board(&frame)?;
+            Some(board_region(&frame, BoardRect { x: grid.x0, y: grid.y0, side: grid.side() }))
+        });
+        cx.spawn(async move |this, cx| {
+            let found = task.await;
+            let _ = this.update(cx, |this, cx| {
+                let Some(wide) = &mut this.wide else { return };
+                wide.searching = false;
+                let Some(region) = found else { return };
+                match this.narrow(region) {
+                    Ok(()) => this.send(Command::Reframe),
+                    Err(error) => tracing::warn!(%error, "capture could not narrow to the board"),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Найти доску заново по клавише R: начать с того, что видно, — и, если
+    /// идёт анализ, искать доску во всём окне трансляции: вдруг она уехала.
+    fn find_board_again(&mut self, cx: &mut Context<Self>) {
+        self.relocate();
+        if matches!(self.phase, Phase::Live) && self.demo.is_none() && self.wide.is_none() {
+            self.widen(cx);
+        }
     }
 
     fn setup_point(&self, position: Point<Pixels>) -> Option<(f32, f32)> {
@@ -920,6 +1009,7 @@ impl Workspace {
             _ => status(p, p.faint, "Трансляция не подключена".into(), None),
         };
         let board = match self.model.recognition.as_ref() {
+            _ if self.wide.is_some() => status(p, p.caution, "Ищу доску".into(), None),
             Some(r) if r.board_found => status(
                 p,
                 if r.mean_confidence > model::CONFIDENT { p.live } else { p.caution },
@@ -1358,6 +1448,19 @@ fn fit_placing(window: &mut Window) {
     }
 }
 
+/// Область захвата для доски `board` на кадре всего окна — в долях окна и с
+/// запасом по краям: доска, чуть сдвинувшись, остаётся в кадре.
+fn board_region(frame: &Frame, board: BoardRect) -> RegionF {
+    let (width, height) = (f64::from(frame.width()), f64::from(frame.height()));
+    RegionF {
+        x: f64::from(board.x) / width,
+        y: f64::from(board.y) / height,
+        width: f64::from(board.side) / width,
+        height: f64::from(board.side) / height,
+    }
+    .with_margin(0.06)
+}
+
 /// Где на экране окажется кадр `width`×`height`, вписанный в `space` целиком
 /// с сохранением пропорций.
 fn image_rect(space: Bounds<Pixels>, (width, height): (u32, u32)) -> Bounds<Pixels> {
@@ -1438,7 +1541,7 @@ impl Render for Workspace {
             .key_context("Workspace")
             .on_action(cx.listener(|this, _: &TogglePause, _, cx| this.toggle_pause(cx)))
             .on_action(cx.listener(|this, _: &Flip, _, _| this.send(Command::Flip)))
-            .on_action(cx.listener(|this, _: &Relocate, _, _| this.relocate()))
+            .on_action(cx.listener(|this, _: &Relocate, _, cx| this.find_board_again(cx)))
             .on_action(cx.listener(|this, _: &PickSource, _, cx| this.pick(cx)))
             .on_action(cx.listener(|this, _: &CopyFen, _, cx| this.copy_fen(cx)))
             .on_action(cx.listener(|this, _: &CopyPgn, _, cx| this.copy_pgn(cx)))
