@@ -8,6 +8,7 @@
 
 mod assets;
 mod model;
+mod overlay;
 mod pieces;
 mod platform;
 mod theme;

@@ -29,7 +29,28 @@ screencapturekit = { version = "10.0.3", features = ["macos_15_0"] }
 # Уровень окна («поверх всех окон») GPUI меняет только при создании окна —
 # после него только напрямую у NSWindow. Версии — те же, что внутри GPUI.
 objc2 = "0.6.4"
-objc2-app-kit = { version = "0.3.2", default-features = false, features = ["NSResponder", "NSView", "NSWindow"] }
+objc2-app-kit = { version = "0.3.2", default-features = false, features = [
+    "NSGraphics",
+    "NSResponder",
+    "NSView",
+    "NSWindow",
+] }
+# Стрелки поверх трансляции: место окна трансляции — из списка окон
+# CoreGraphics. Версии — те же, что внутри GPUI.
+objc2-core-foundation = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "CFArray",
+    "CFCGTypes",
+    "CFDictionary",
+    "CFNumber",
+    "CFString",
+] }
+objc2-core-graphics = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "CGDirectDisplay",
+    "CGGeometry",
+    "CGWindow",
+] }
 raw-window-handle = { version = "0.6.2", features = ["std"] }
 windows = { version = "0.62", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging"] }
 # Linux: X11 — «поверх всех окон» и захват окна там, где нет портала рабочего
