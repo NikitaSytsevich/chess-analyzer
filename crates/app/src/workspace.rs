@@ -446,6 +446,7 @@ impl Workspace {
                                 fit_placing(window);
                             }
                             Err(error) => {
+                                tracing::warn!(%error, "capture did not start");
                                 this.phase = Phase::Welcome;
                                 this.warn(format!("Не удалось начать захват: {error}"), cx);
                             }

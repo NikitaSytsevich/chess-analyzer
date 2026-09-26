@@ -82,7 +82,22 @@ struct State {
 impl CaptureSession {
     /// Запускает захват. Кадры кладутся в `slot`, закрытие окна трансляции
     /// сообщается в `on_stop`.
+    ///
+    /// Пул кадров и захват создаются в многопоточном подразделении COM (MTA)
+    /// — там же, где Windows вызывает обработчик кадров. Пул, созданный в
+    /// потоке окна приложения (он в однопоточном подразделении, STA), не даёт
+    /// пересоздать себя из обработчика (`RPC_E_WRONG_THREAD`): окно
+    /// трансляции, развёрнутое во весь экран, перестало бы захватываться.
     pub fn start(
+        source: Source,
+        config: CaptureConfig,
+        slot: Arc<FrameSlot>,
+        on_stop: impl Fn(Option<String>) + Send + Sync + 'static,
+    ) -> Result<Self, CaptureError> {
+        in_mta(move || Self::start_in_mta(source, config, slot, on_stop))
+    }
+
+    fn start_in_mta(
         source: Source,
         config: CaptureConfig,
         slot: Arc<FrameSlot>,
@@ -195,11 +210,16 @@ impl CaptureSession {
 
 impl Drop for CaptureSession {
     fn drop(&mut self) {
-        let _ = self.pool.RemoveFrameArrived(self.frame_arrived);
-        let _ = self.source.item.RemoveClosed(self.closed);
-        if let Err(error) = self.session.Close().and_then(|()| self.pool.Close()) {
-            tracing::warn!(%error, "capture did not stop cleanly");
-        }
+        // Остановка — в том же подразделении COM, где захват создан (см. `start`).
+        let (pool, session, item) = (&self.pool, &self.session, &self.source.item);
+        let (frame_arrived, closed) = (self.frame_arrived, self.closed);
+        in_mta(move || {
+            let _ = pool.RemoveFrameArrived(frame_arrived);
+            let _ = item.RemoveClosed(closed);
+            if let Err(error) = session.Close().and_then(|()| pool.Close()) {
+                tracing::warn!(%error, "capture did not stop cleanly");
+            }
+        });
         lock(&self.shared.state).stop = true;
         self.shared.wake.notify_all();
         if let Some(worker) = self.worker.take() {
@@ -464,6 +484,16 @@ fn texture(
     let created: ID3D11Texture2D = created.ok_or_else(|| windows::core::Error::from(E_POINTER))?;
     *slot = Some(Texture { texture: created.clone(), width, height });
     Ok(created)
+}
+
+/// Выполняет `work` в отдельном потоке без своей настройки COM — то есть в
+/// многопоточном подразделении (MTA), как и потоки, из которых Windows шлёт
+/// кадры, — и ждёт результата.
+fn in_mta<T: Send>(work: impl FnOnce() -> T + Send) -> T {
+    std::thread::scope(|scope| match scope.spawn(work).join() {
+        Ok(result) => result,
+        Err(panic) => std::panic::resume_unwind(panic),
+    })
 }
 
 fn stream_error(error: windows::core::Error) -> CaptureError {

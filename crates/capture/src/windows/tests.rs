@@ -15,6 +15,7 @@ use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
     BeginPaint, CreateSolidBrush, DeleteObject, EndPaint, FillRect, PAINTSTRUCT,
 };
+use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::WinRT::Graphics::Capture::IGraphicsCaptureItemInterop;
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -35,6 +36,22 @@ const BLUE: [u8; 4] = [255, 0, 0, 255];
 #[test]
 #[ignore = "нужен рабочий стол Windows"]
 fn a_real_window_is_captured_cropped_resent_and_followed_as_it_grows() {
+    captured_cropped_resent_and_followed_as_it_grows();
+}
+
+/// Захват начинает главный поток приложения, а он — в однопоточном
+/// подразделении COM (STA): так его настраивает GPUI. Кадры же Windows
+/// присылает из своего пула потоков, и окно, развёрнутое во весь экран,
+/// должно захватываться и дальше.
+#[test]
+#[ignore = "нужен рабочий стол Windows"]
+fn a_capture_started_on_the_ui_thread_follows_a_window_as_it_grows() {
+    // SAFETY: поток теста входит в STA один раз и до конца теста.
+    unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) }.ok().unwrap();
+    captured_cropped_resent_and_followed_as_it_grows();
+}
+
+fn captured_cropped_resent_and_followed_as_it_grows() {
     // Зависание — тоже провал, и понятнее, чем тест, который не кончается.
     std::thread::spawn(|| {
         std::thread::sleep(Duration::from_secs(60));
@@ -42,13 +59,21 @@ fn a_real_window_is_captured_cropped_resent_and_followed_as_it_grows() {
         std::process::abort();
     });
     let window = TestWindow::open();
-    let interop = windows::core::factory::<GraphicsCaptureItem, IGraphicsCaptureItemInterop>().unwrap();
-    // SAFETY: `window` — живое окно, его поток ждёт сообщений.
-    let item: GraphicsCaptureItem = unsafe { interop.CreateForWindow(window.hwnd()) }.unwrap();
+    // Окно выбирается так же, как его отдаёт системный выбор, — в потоке из
+    // пула Windows, то есть в многопоточном подразделении COM.
+    let hwnd = window.hwnd;
+    let picked = std::thread::spawn(move || {
+        let interop = windows::core::factory::<GraphicsCaptureItem, IGraphicsCaptureItemInterop>().unwrap();
+        // SAFETY: окно живо, его поток ждёт сообщений.
+        let item: GraphicsCaptureItem = unsafe { interop.CreateForWindow(HWND(hwnd as *mut _)) }.unwrap();
+        source(&item).unwrap()
+    })
+    .join()
+    .unwrap();
 
     let setup = Arc::new(FrameSlot::new());
     let config = CaptureConfig { fps: 10, region: None, max_side_region: 64, max_side_full: 1600 };
-    let capture = CaptureSession::start(source(&item).unwrap(), config, Arc::clone(&setup), |_| {}).unwrap();
+    let capture = CaptureSession::start(picked, config, Arc::clone(&setup), |_| {}).unwrap();
 
     // Окно целиком — в полный размер (при масштабе экрана больше 100 % оно
     // больше 400×300), слева красное, справа синее.

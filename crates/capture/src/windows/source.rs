@@ -63,19 +63,39 @@ pub fn pick_source(on_done: impl FnOnce(Result<Option<Source>, CaptureError>) + 
         return;
     }
     ask_borderless();
-    let shown = show_picker({
-        let report = report.clone();
-        move |picked| {
-            report(match picked {
-                Ok(item) => source(&item).map(Some),
-                // Выбор закрыли: вместо окна пришёл null.
-                Err(error) if error.code().is_ok() => Ok(None),
-                Err(error) => Err(CaptureError::Picker(error.message())),
-            });
+    // Выбор привязывается к активному окну этого потока — узнаём его здесь.
+    // SAFETY: функции только читают, какое окно сейчас активно.
+    let mut owner = unsafe { GetActiveWindow() };
+    if owner.is_invalid() {
+        owner = unsafe { GetForegroundWindow() };
+    }
+    // `HWND` не `Send` — в другой поток он идёт числом.
+    let owner = owner.0 as isize;
+    // Выбор показывается из потока без своей настройки COM — из
+    // многопоточного подразделения (MTA). Окно, которое он вернёт, живёт в
+    // подразделении, откуда выбор показан, и в нём же должен работать весь
+    // захват (см. `CaptureSession::start`). Из потока окна приложения (он в
+    // STA) захват окна, развёрнутого во весь экран, остановился бы.
+    let in_thread = report.clone();
+    let spawned = std::thread::Builder::new().name("capture picker".into()).spawn(move || {
+        let report = in_thread;
+        let shown = show_picker(HWND(owner as *mut _), {
+            let report = report.clone();
+            move |picked| {
+                report(match picked {
+                    Ok(item) => source(&item).map(Some),
+                    // Выбор закрыли: вместо окна пришёл null.
+                    Err(error) if error.code().is_ok() => Ok(None),
+                    Err(error) => Err(CaptureError::Picker(error.message())),
+                });
+            }
+        });
+        if let Err(error) = shown {
+            report(Err(CaptureError::Picker(error.message())));
         }
     });
-    if let Err(error) = shown {
-        report(Err(CaptureError::Picker(error.message())));
+    if let Err(error) = spawned {
+        report(Err(CaptureError::Picker(error.to_string())));
     }
 }
 
@@ -91,16 +111,13 @@ fn ask_borderless() {
     }
 }
 
+/// Показывает выбор над окном `owner` — выбор из обычного приложения Win32
+/// должен знать окно-владельца.
 fn show_picker(
+    owner: HWND,
     on_picked: impl FnOnce(windows::core::Result<GraphicsCaptureItem>) + Send + 'static,
 ) -> windows::core::Result<()> {
     let picker = GraphicsCapturePicker::new()?;
-    // Выбор из обычного приложения Win32 должен знать окно-владельца.
-    // SAFETY: функции только читают, какое окно сейчас активно.
-    let mut owner = unsafe { GetActiveWindow() };
-    if owner.is_invalid() {
-        owner = unsafe { GetForegroundWindow() };
-    }
     // SAFETY: `owner` — окно, которое Windows только что вернула; выбор его
     // только запоминает.
     unsafe { picker.cast::<IInitializeWithWindow>()?.Initialize(owner)? };
