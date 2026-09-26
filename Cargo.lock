@@ -157,7 +157,7 @@ checksum = "683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923"
 
 [[package]]
 name = "analyzer-app"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "analyzer-capture",
  "analyzer-chess",
@@ -181,7 +181,7 @@ dependencies = [
 
 [[package]]
 name = "analyzer-capture"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "analyzer-vision",
  "ashpd",
@@ -196,7 +196,7 @@ dependencies = [
 
 [[package]]
 name = "analyzer-chess"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "shakmaty",
  "thiserror 2.0.21",
@@ -204,7 +204,7 @@ dependencies = [
 
 [[package]]
 name = "analyzer-cli"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "analyzer-chess",
  "analyzer-engine",
@@ -217,7 +217,7 @@ dependencies = [
 
 [[package]]
 name = "analyzer-engine"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "analyzer-chess",
  "flume",
@@ -227,7 +227,7 @@ dependencies = [
 
 [[package]]
 name = "analyzer-session"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "analyzer-chess",
  "analyzer-engine",
@@ -239,7 +239,7 @@ dependencies = [
 
 [[package]]
 name = "analyzer-tracker"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "analyzer-chess",
  "analyzer-vision",
@@ -248,7 +248,7 @@ dependencies = [
 
 [[package]]
 name = "analyzer-vision"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "analyzer-chess",
  "resvg 0.48.1",
@@ -8900,7 +8900,7 @@ checksum = "ec7a2a501ed189703dba8b08142f057e887dfc4b2cc4db2d343ac6376ba3e0b9"
 
 [[package]]
 name = "xtask"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "resvg 0.48.1",
