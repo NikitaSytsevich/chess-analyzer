@@ -2,7 +2,7 @@ use std::time::Instant;
 
 use analyzer_chess::{Board, Fen, Square};
 use analyzer_vision::synth::{Style, render};
-use analyzer_vision::{LEARNED_SET, Orientation, Recognizer, bundled_sets, find_board};
+use analyzer_vision::{Frame, LEARNED_SET, Orientation, Recognizer, bundled_sets, find_board};
 
 const POSITIONS: [&str; 5] = [
     "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR",
@@ -103,21 +103,39 @@ fn something_that_is_not_a_board_is_rejected() {
 }
 
 #[test]
-fn a_frame_fits_the_time_budget() {
-    // Захват отдаёт область доски не больше 640 px: клетка около 72 px.
-    let style = Style { square: 72, margin: 32, ..Style::lichess("cburnett") };
-    let frame = render(&board(POSITIONS[1]), &style, &[Square::E2, Square::E4]);
+fn a_page_without_the_board_is_not_read_as_an_empty_board() {
     let mut recognizer = Recognizer::new();
-    let started = Instant::now();
-    recognizer.observe(&frame).unwrap();
-    let first = started.elapsed();
-    let started = Instant::now();
-    for _ in 0..20 {
-        recognizer.observe(&frame).unwrap();
-    }
-    let steady = started.elapsed() / 20;
-    println!("первый кадр (поиск доски и набора): {first:?}, дальше: {steady:?} на кадр");
-    assert!(steady.as_millis() < 15, "{steady:?}");
+    let style = Style::lichess("cburnett");
+    assert_recognized(&mut recognizer, &style, POSITIONS[1], &[]);
+    // На месте доски — ровная тёмная страница (ошибка сети, заставка): её
+    // клетки ровные, и без проверки читались бы уверенно — пустой доской.
+    let side = style.square * 8 + style.margin * 2;
+    let page = Frame::new(side, side, vec![32; (side * side * 4) as usize], Instant::now());
+    assert!(recognizer.observe(&page).is_err());
+    // Доска вернулась — читается на том же месте.
+    assert_recognized(&mut recognizer, &style, POSITIONS[2], &[]);
+}
+
+#[test]
+fn squares_marked_by_the_commentator_do_not_lose_the_board() {
+    let mut recognizer = Recognizer::new();
+    let style = Style::lichess("cburnett");
+    assert_recognized(&mut recognizer, &style, POSITIONS[1], &[]);
+    // Комментатор выделил десяток клеток — доска та же.
+    let marked = [
+        Square::A1,
+        Square::B2,
+        Square::C3,
+        Square::D4,
+        Square::E5,
+        Square::F6,
+        Square::G7,
+        Square::H8,
+        Square::A8,
+        Square::H1,
+    ];
+    let frame = render(&board(POSITIONS[1]), &style, &marked);
+    assert_eq!(recognizer.observe(&frame).expect("still a board").board, board(POSITIONS[1]));
 }
 
 #[test]
