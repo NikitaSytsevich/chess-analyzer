@@ -35,6 +35,12 @@ pub use macos::{CaptureSession, Source, pick_source};
 #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
 pub use unsupported::{CaptureSession, Source, pick_source};
 
+/// Окно трансляции так, как его знает система: номер окна CoreGraphics на
+/// macOS, HWND на Windows, окно X11 на Linux. По нему стрелки находят окно
+/// на экране и ложатся поверх него.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct NativeWindow(pub u64);
+
 /// Ошибка захвата, понятная без знания системных API.
 #[derive(Debug, thiserror::Error)]
 pub enum CaptureError {

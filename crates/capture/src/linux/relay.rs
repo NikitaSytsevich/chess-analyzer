@@ -13,7 +13,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
-use analyzer_vision::{Frame, FrameSlot};
+use analyzer_vision::{Frame, FrameSlot, FrameSource, WindowRect};
 
 use crate::config::fit_pixels;
 use crate::pixels::{PixelBox, downscale_bgra, region_pixels};
@@ -45,12 +45,21 @@ impl Content {
         let bytes = &self.bgra[start..];
         let max_side = if config.region.is_some() { config.max_side_region } else { config.max_side_full };
         let (out_width, out_height) = fit_pixels(f64::from(want.width), f64::from(want.height), max_side);
-        Some(if (out_width, out_height) == (want.width, want.height) {
+        let frame = if (out_width, out_height) == (want.width, want.height) {
             Frame::from_strided(want.width, want.height, stride, bytes, self.captured_at)
         } else {
             let pixels = downscale_bgra(bytes, want.width, want.height, stride, out_width, out_height);
             Frame::new(out_width, out_height, pixels, self.captured_at)
-        })
+        };
+        Some(frame.with_source(FrameSource {
+            area: WindowRect {
+                x: want.x as f32,
+                y: want.y as f32,
+                width: want.width as f32,
+                height: want.height as f32,
+            },
+            window: Some((width as f32, height as f32)),
+        }))
     }
 }
 
@@ -233,6 +242,10 @@ mod tests {
         let frame = window(40, 20).cut(&config(Some(region))).unwrap();
         assert_eq!((frame.width(), frame.height()), (20, 5));
         assert_eq!(frame.pixel(0, 0), [10, 10, 0, 255]);
+        // Кадр помнит, откуда он на окне: по этому месту ложатся стрелки.
+        let source = frame.source().unwrap();
+        assert_eq!(source.area, WindowRect { x: 10.0, y: 10.0, width: 20.0, height: 5.0 });
+        assert_eq!(source.window, Some((40.0, 20.0)));
     }
 
     #[test]
@@ -252,6 +265,9 @@ mod tests {
     fn large_windows_are_scaled_down() {
         let frame = window(64, 32).cut(&CaptureConfig { max_side_full: 16, ..config(None) }).unwrap();
         assert_eq!((frame.width(), frame.height()), (16, 8));
+        // Уменьшенный кадр — всё то же окно целиком: пиксель кадра — 4 пикселя окна.
+        let cell = frame.to_window(WindowRect { x: 1.0, y: 1.0, width: 2.0, height: 2.0 }).unwrap();
+        assert_eq!(cell, WindowRect { x: 4.0, y: 4.0, width: 8.0, height: 8.0 });
     }
 
     #[test]

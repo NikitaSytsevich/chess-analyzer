@@ -3,7 +3,7 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use analyzer_vision::{Frame, FrameSlot};
+use analyzer_vision::{Frame, FrameSlot, FrameSource, WindowRect};
 use windows::Foundation::TypedEventHandler;
 use windows::Graphics::Capture::{
     Direct3D11CaptureFrame, Direct3D11CaptureFramePool, GraphicsCaptureItem, GraphicsCaptureSession,
@@ -29,7 +29,7 @@ use windows::core::{IInspectable, Interface};
 use super::Source;
 use crate::config::fit_pixels;
 use crate::pixels::{downscale_bgra, region_pixels};
-use crate::{CaptureConfig, CaptureError, CaptureStats, RegionF};
+use crate::{CaptureConfig, CaptureError, CaptureStats, NativeWindow, RegionF};
 
 /// Кадры в BGRA — в том же формате, что ждёт распознавание.
 const FORMAT: DirectXPixelFormat = DirectXPixelFormat::B8G8R8A8UIntNormalized;
@@ -150,6 +150,11 @@ impl CaptureSession {
 
     pub fn source(&self) -> &Source {
         &self.source
+    }
+
+    /// HWND окна трансляции (см. [`NativeWindow`]).
+    pub fn native_window(&self) -> Option<NativeWindow> {
+        self.source.native_window()
     }
 
     /// Переключает захват на область окна (или на окно целиком).
@@ -350,6 +355,17 @@ impl Gpu {
     fn read(&mut self, config: &CaptureConfig) -> windows::core::Result<Option<Frame>> {
         let Some(latest) = &self.latest else { return Ok(None) };
         let area = region_pixels(config.region.unwrap_or(RegionF::FULL), latest.width, latest.height);
+        // Откуда кадр на окне: в пикселях окна, того же размера, что у его
+        // видимых границ (их же снимает Windows.Graphics.Capture).
+        let source = FrameSource {
+            area: WindowRect {
+                x: area.x as f32,
+                y: area.y as f32,
+                width: area.width as f32,
+                height: area.height as f32,
+            },
+            window: Some((latest.width as f32, latest.height as f32)),
+        };
         let latest = latest.texture.clone();
         let staging = texture(&self.device, &mut self.staging, area.width, area.height, true)?;
         let src = D3D11_BOX {
@@ -385,7 +401,7 @@ impl Gpu {
         };
         // SAFETY: `bytes` больше не используется.
         unsafe { self.context.Unmap(&staging, 0) };
-        Ok(Some(frame))
+        Ok(Some(frame.with_source(source)))
     }
 }
 

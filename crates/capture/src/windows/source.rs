@@ -4,12 +4,16 @@ use windows::Graphics::Capture::{
     GraphicsCaptureAccess, GraphicsCaptureAccessKind, GraphicsCaptureItem, GraphicsCapturePicker,
     GraphicsCaptureSession,
 };
+use windows::Win32::Foundation::{HWND, LPARAM, RECT};
+use windows::Win32::Graphics::Dwm::{DWMWA_EXTENDED_FRAME_BOUNDS, DwmGetWindowAttribute};
 use windows::Win32::UI::Input::KeyboardAndMouse::GetActiveWindow;
 use windows::Win32::UI::Shell::IInitializeWithWindow;
-use windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
-use windows::core::Interface;
+use windows::Win32::UI::WindowsAndMessaging::{
+    EnumWindows, GetForegroundWindow, GetWindowTextLengthW, GetWindowTextW, IsWindowVisible,
+};
+use windows::core::{BOOL, Interface};
 
-use crate::CaptureError;
+use crate::{CaptureError, NativeWindow};
 
 /// Окно, которое комментатор выбрал для захвата.
 #[derive(Clone)]
@@ -19,11 +23,18 @@ pub struct Source {
     pub title: String,
     /// Размер окна в пикселях на момент выбора.
     size: (u32, u32),
+    /// Само окно — если нашлось (см. `find_window`).
+    window: Option<NativeWindow>,
 }
 
 impl Source {
     pub fn pixel_size(&self) -> (u32, u32) {
         self.size
+    }
+
+    /// HWND выбранного окна (см. [`NativeWindow`]).
+    pub fn native_window(&self) -> Option<NativeWindow> {
+        self.window
     }
 }
 
@@ -103,6 +114,80 @@ pub(super) fn source(item: &GraphicsCaptureItem) -> Result<Source, CaptureError>
         Ok((item.DisplayName()?.to_string_lossy(), (size.Width.max(1) as u32, size.Height.max(1) as u32)))
     };
     let (title, size) = describe().map_err(|error| CaptureError::Picker(error.message()))?;
+    let window = find_window(&title, size).map(|hwnd| NativeWindow(hwnd.0 as usize as u64));
+    if window.is_none() {
+        tracing::info!(%title, "the picked window is not found among top-level windows");
+    }
     let title = if title.trim().is_empty() { "Окно трансляции".to_owned() } else { title };
-    Ok(Source { item: item.clone(), title, size })
+    Ok(Source { item: item.clone(), title, size, window })
+}
+
+/// Окно, которое показывает выбранный источник. Системный выбор его не
+/// называет — только заголовок и размер, — а стрелкам поверх трансляции оно
+/// нужно. Ищем среди видимых окон с тем же заголовком: сначала того же
+/// размера, иначе — любое из них. Выбор только что закрылся, и окно ещё не
+/// успело ни переименоваться, ни изменить размер. Из одинаковых берётся
+/// верхнее: окна перебираются сверху вниз.
+fn find_window(title: &str, size: (u32, u32)) -> Option<HWND> {
+    struct Search {
+        title: Vec<u16>,
+        size: (u32, u32),
+        same_size: Option<HWND>,
+        same_title: Option<HWND>,
+    }
+
+    unsafe extern "system" fn visit(hwnd: HWND, lparam: LPARAM) -> BOOL {
+        // SAFETY: `lparam` — указатель на `Search`, живой до конца `EnumWindows`.
+        let search = unsafe { &mut *(lparam.0 as *mut Search) };
+        // SAFETY: функции только читают сведения об окне, которое прислала
+        // система; закрытое за это время окно даст пустой ответ.
+        if !unsafe { IsWindowVisible(hwnd) }.as_bool() || window_title(hwnd) != search.title {
+            return BOOL::from(true);
+        }
+        search.same_title.get_or_insert(hwnd);
+        if frame_size(hwnd)
+            .is_some_and(|found| found.0.abs_diff(search.size.0) <= 2 && found.1.abs_diff(search.size.1) <= 2)
+        {
+            search.same_size = Some(hwnd);
+            return BOOL::from(false);
+        }
+        BOOL::from(true)
+    }
+
+    if title.is_empty() {
+        return None;
+    }
+    let mut search =
+        Search { title: title.encode_utf16().collect(), size, same_size: None, same_title: None };
+    // SAFETY: `visit` получает указатель на `search`, который живёт дольше
+    // перебора. Перебор, остановленный `visit`, возвращает ошибку — это не она.
+    let _ = unsafe { EnumWindows(Some(visit), LPARAM(&raw mut search as isize)) };
+    search.same_size.or(search.same_title)
+}
+
+/// Заголовок окна в UTF-16.
+fn window_title(hwnd: HWND) -> Vec<u16> {
+    // SAFETY: только чтение заголовка в буфер нужной длины.
+    let length = unsafe { GetWindowTextLengthW(hwnd) };
+    let mut buffer = vec![0u16; usize::try_from(length).unwrap_or(0) + 1];
+    let copied = unsafe { GetWindowTextW(hwnd, &mut buffer) };
+    buffer.truncate(usize::try_from(copied).unwrap_or(0));
+    buffer
+}
+
+/// Видимые границы окна (без невидимой рамки для изменения размера) — их же
+/// снимает захват.
+fn frame_size(hwnd: HWND) -> Option<(u32, u32)> {
+    let mut rect = RECT::default();
+    // SAFETY: DWM пишет в `rect` ровно `size_of::<RECT>()` байт.
+    unsafe {
+        DwmGetWindowAttribute(
+            hwnd,
+            DWMWA_EXTENDED_FRAME_BOUNDS,
+            (&raw mut rect).cast(),
+            std::mem::size_of::<RECT>() as u32,
+        )
+    }
+    .ok()?;
+    Some(((rect.right - rect.left).max(0) as u32, (rect.bottom - rect.top).max(0) as u32))
 }

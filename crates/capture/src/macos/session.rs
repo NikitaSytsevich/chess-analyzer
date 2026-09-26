@@ -2,7 +2,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use analyzer_vision::{Frame, FrameSlot};
+use analyzer_vision::{Frame, FrameSlot, FrameSource, WindowRect};
 use screencapturekit::cm::SCFrameStatus;
 use screencapturekit::cv::CVPixelBufferLockFlags;
 use screencapturekit::prelude::*;
@@ -10,7 +10,7 @@ use screencapturekit::stream::delegate_trait::StreamCallbacks;
 
 use super::Source;
 use crate::config::fit_pixels;
-use crate::{CaptureConfig, CaptureError, CaptureStats, RegionF};
+use crate::{CaptureConfig, CaptureError, CaptureStats, NativeWindow, RegionF};
 
 #[derive(Default)]
 struct Counters {
@@ -22,7 +22,9 @@ struct Counters {
 pub struct CaptureSession {
     stream: SCStream,
     source: Source,
-    config: Mutex<CaptureConfig>,
+    /// Настройки захвата. Их читает и обработчик кадров: по области он
+    /// помечает, какую часть окна показывает кадр.
+    config: Arc<Mutex<CaptureConfig>>,
     counters: Arc<Counters>,
     /// Куда кладутся кадры. Меняется на ходу: пока комментатор выбирает
     /// доску, кадры окна идут экрану настройки, потом — распознаванию.
@@ -46,6 +48,9 @@ impl CaptureSession {
         let handler_counters = Arc::clone(&counters);
         let target = Arc::new(Mutex::new(slot));
         let handler_target = Arc::clone(&target);
+        let shared_config = Arc::new(Mutex::new(config));
+        let handler_config = Arc::clone(&shared_config);
+        let window_points = source.size_points;
         stream.add_output_handler(
             move |sample: CMSampleBuffer, of_type: SCStreamOutputType| {
                 if !matches!(of_type, SCStreamOutputType::Screen) {
@@ -60,6 +65,9 @@ impl CaptureSession {
                     Some(_) => return,
                 }
                 if let Some(frame) = frame_from_sample(&sample) {
+                    let region =
+                        handler_config.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).region;
+                    let frame = frame.with_source(frame_source(region, window_points));
                     handler_counters.frames.fetch_add(1, Ordering::Relaxed);
                     let slot =
                         Arc::clone(&handler_target.lock().unwrap_or_else(|poisoned| poisoned.into_inner()));
@@ -70,11 +78,16 @@ impl CaptureSession {
         );
         stream.start_capture().map_err(|error| CaptureError::Stream(error.to_string()))?;
         tracing::info!(title = %source.title, ?config, "capture started");
-        Ok(Self { stream, source, config: Mutex::new(config), counters, target })
+        Ok(Self { stream, source, config: shared_config, counters, target })
     }
 
     pub fn source(&self) -> &Source {
         &self.source
+    }
+
+    /// Номер окна трансляции (см. [`NativeWindow`]).
+    pub fn native_window(&self) -> Option<NativeWindow> {
+        self.source.native_window()
     }
 
     /// Переключает захват на область окна (или на окно целиком) без
@@ -85,12 +98,16 @@ impl CaptureSession {
     }
 
     /// Новые частота, область и размер кадра — без перезапуска потока.
+    ///
+    /// Настройки не держатся под блокировкой, пока поток перенастраивается:
+    /// их читает обработчик кадров, и ScreenCaptureKit, ждущий обработчик,
+    /// ждал бы сам себя. Настраивают захват только из окна приложения, по
+    /// одному разу, — гонок между двумя перенастройками нет.
     pub fn reconfigure(&self, config: CaptureConfig) -> Result<(), CaptureError> {
-        let mut current = self.config.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         self.stream
             .update_configuration(&stream_config(&self.source, &config))
             .map_err(|error| CaptureError::Stream(error.to_string()))?;
-        *current = config;
+        *self.config.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = config;
         Ok(())
     }
 
@@ -129,6 +146,22 @@ fn frame_from_sample(sample: &CMSampleBuffer) -> Option<Frame> {
     // копируется в кадр раньше, чем `guard` будет отпущен.
     let bytes = unsafe { guard.as_slice() }?;
     Some(Frame::from_strided(width, height, bytes_per_row, bytes, Instant::now()))
+}
+
+/// Какую часть окна показывает кадр: область `region` в точках окна — той
+/// же, что задана захвату в `stream_config`. Размер окна захват не
+/// отслеживает — область в точках от него не зависит.
+fn frame_source(region: Option<RegionF>, (window_w, window_h): (f64, f64)) -> FrameSource {
+    let region = region.unwrap_or(RegionF::FULL);
+    FrameSource {
+        area: WindowRect {
+            x: (region.x * window_w) as f32,
+            y: (region.y * window_h) as f32,
+            width: (region.width * window_w) as f32,
+            height: (region.height * window_h) as f32,
+        },
+        window: None,
+    }
 }
 
 fn stream_config(source: &Source, config: &CaptureConfig) -> SCStreamConfiguration {
