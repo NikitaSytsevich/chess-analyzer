@@ -14,6 +14,9 @@ pub(crate) enum VisionControl {
     /// Доска на кадре сместилась или сменилась: искать заново и начать
     /// партию с того, что видно.
     Relocate,
+    /// Кадры показывают другую часть окна: искать доску заново, а партию
+    /// вести дальше.
+    Reframe,
     SetPosition(Chess),
     Stop,
 }
@@ -37,6 +40,9 @@ pub struct RecognitionStatus {
     pub observation: Option<Arc<Observation>>,
     /// Где эта доска на окне трансляции — если кадр из окна.
     pub board: Option<BoardOnWindow>,
+    /// Размер окна трансляции на последнем кадре — даже если доски на нём
+    /// нет; `None` — захват за размером окна не следит.
+    pub window: Option<(f32, f32)>,
 }
 
 /// Где доска на окне трансляции: по этому месту стрелки ложатся поверх неё.
@@ -85,6 +91,10 @@ pub(crate) fn run(
                     recognizer.forget_orientation();
                     tracker.reset();
                     tracker.lock_orientation(false);
+                }
+                VisionControl::Reframe => {
+                    misses = 0;
+                    recognizer.forget_grid();
                 }
                 VisionControl::SetPosition(position) => {
                     let change = tracker.set_position(position);
@@ -152,6 +162,7 @@ pub(crate) fn run(
                 frame_time: started.elapsed(),
                 observation: observation.map(Arc::new),
                 board,
+                window: frame.source().and_then(|source| source.window),
             };
             let _ = output.send(VisionOutput::Status(status));
         }

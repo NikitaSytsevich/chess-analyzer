@@ -55,6 +55,10 @@ pub enum Command {
     /// Раскладка трансляции сменилась: найти доску заново и начать с того,
     /// что видно.
     Relocate,
+    /// Захват теперь показывает другую часть окна трансляции (доску нашли
+    /// заново, после того как окно развернули во весь экран): найти доску
+    /// на кадре заново, а партию продолжать.
+    Reframe,
     /// Комментатор сам задал позицию.
     SetPosition(Chess),
     SetEngine(EngineOptions),
@@ -173,6 +177,9 @@ fn run_core(
                 }
                 Command::Relocate => {
                     let _ = vision_control.send(VisionControl::Relocate);
+                }
+                Command::Reframe => {
+                    let _ = vision_control.send(VisionControl::Reframe);
                 }
                 Command::SetPosition(position) => {
                     let _ = vision_control.send(VisionControl::SetPosition(position));
