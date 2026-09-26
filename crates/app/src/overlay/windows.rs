@@ -25,6 +25,7 @@
 //! GPUI, понимает масштаб каждого монитора (манифест PerMonitorV2).
 
 use std::ffi::c_void;
+use std::time::{Duration, Instant};
 
 use analyzer_capture::NativeWindow;
 use anyhow::{Result, bail};
@@ -33,14 +34,17 @@ use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use windows::Win32::Foundation::{COLORREF, HWND, RECT};
 use windows::Win32::Graphics::Dwm::{DWMWA_CLOAKED, DWMWA_EXTENDED_FRAME_BOUNDS, DwmGetWindowAttribute};
 use windows::Win32::UI::WindowsAndMessaging::{
-    GW_HWNDPREV, GWL_EXSTYLE, GetWindow, GetWindowLongW, GetWindowRect, HWND_TOPMOST, IsIconic, IsWindow,
-    IsWindowVisible, LWA_ALPHA, SW_HIDE, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER,
+    GW_HWNDPREV, GW_OWNER, GWL_EXSTYLE, GetWindow, GetWindowLongW, GetWindowRect, HWND_TOPMOST, IsIconic,
+    IsWindow, IsWindowVisible, LWA_ALPHA, SW_HIDE, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER,
     SWP_SHOWWINDOW, SetLayeredWindowAttributes, SetWindowDisplayAffinity, SetWindowLongW, SetWindowPos,
     ShowWindow, WDA_EXCLUDEFROMCAPTURE, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
     WS_EX_TRANSPARENT,
 };
 
 use super::place::{ScreenRect, TargetState};
+
+/// Переставлять окно стрелок в порядке окон — не чаще этого.
+const RESTACK: Duration = Duration::from_millis(250);
 
 /// Почему стрелкам не найти окно трансляции.
 pub const NO_WINDOW: &str =
@@ -159,17 +163,27 @@ struct Over {
 }
 
 /// Что над окном трансляции `target`: закрывает ли какое-нибудь окно доску
-/// `board` и стоит ли выше трансляции окно стрелок `overlay`.
+/// `board` и стоит ли выше трансляции окно стрелок `overlay`. Всплывающие
+/// окна самой трансляции (меню, подсказки браузера, плашка «Нажмите Esc,
+/// чтобы выйти из полноэкранного режима») — не чужие окна над ней: Windows
+/// держит их над окном-хозяином и поднимает вместе с ним, и стрелки, которые
+/// прятались бы под них, прыгали бы туда-сюда.
 fn over(target: HWND, overlay: HWND, board: RECT) -> Over {
     let mut over = Over { covered: false, overlay: false };
     for window in above(target) {
         if window == overlay {
             over.overlay = true;
-        } else if !over.covered && covers(window, board) {
+        } else if !over.covered && owner(window) != Some(target) && covers(window, board) {
             over.covered = true;
         }
     }
     over
+}
+
+/// Окно-хозяин всплывающего окна.
+fn owner(hwnd: HWND) -> Option<HWND> {
+    // SAFETY: только чтение сведений об окне.
+    unsafe { GetWindow(hwnd, GW_OWNER) }.ok()
 }
 
 /// Закрывает ли окно доску `board` хоть краем. Не закрывают невидимые окна
@@ -208,6 +222,8 @@ pub struct Native {
     shown: bool,
     /// Где окно стоит сейчас — чтобы не двигать его на то же место.
     placed: Option<(i32, i32, u32, u32)>,
+    /// Когда окно стрелок в последний раз переставляли в порядке окон.
+    restacked: Option<Instant>,
 }
 
 impl Native {
@@ -218,7 +234,7 @@ impl Native {
         let RawWindowHandle::Win32(handle) = HasWindowHandle::window_handle(window)?.as_raw() else {
             bail!("окно не из Win32");
         };
-        Ok(Self { hwnd: HWND(handle.hwnd.get() as *mut c_void), shown: false, placed: None })
+        Ok(Self { hwnd: HWND(handle.hwnd.get() as *mut c_void), shown: false, placed: None, restacked: None })
     }
 
     /// Прозрачное для мыши окно-инструмент, которое не становится активным и
@@ -254,11 +270,17 @@ impl Native {
         let above = visible_above(target.hwnd);
         let stacked =
             if over.covered { above == Some(self.hwnd) } else { over.overlay && topmost(self.hwnd) };
-        if self.shown && stacked && self.placed == Some((x, y, width, height)) {
+        // Переставлять окно стрелок в порядке окон — не чаще раза в
+        // четверть секунды: если какое-то окно раз за разом встаёт над ним
+        // само, перестановки на каждой сверке нагружали бы DWM и всё, что он
+        // рисует.
+        let now = Instant::now();
+        let restack = !stacked && self.restacked.is_none_or(|at| now.duration_since(at) >= RESTACK);
+        if self.shown && !restack && self.placed == Some((x, y, width, height)) {
             return Ok(());
         }
         let mut flags = SWP_NOACTIVATE | SWP_SHOWWINDOW;
-        let insert_after = if stacked {
+        let insert_after = if !restack {
             flags |= SWP_NOZORDER;
             None
         } else if over.covered
@@ -277,6 +299,9 @@ impl Native {
         };
         // SAFETY: как в `prepare`.
         unsafe { SetWindowPos(self.hwnd, insert_after, x, y, width as i32, height as i32, flags) }?;
+        if restack {
+            self.restacked = Some(now);
+        }
         self.shown = true;
         self.placed = Some((x, y, width, height));
         Ok(())
