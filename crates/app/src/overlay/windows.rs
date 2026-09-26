@@ -19,10 +19,11 @@
 //! Захвату экрана окно стрелок не видно (`WDA_EXCLUDEFROMCAPTURE`, Windows 10
 //! 2004 и новее): эфир, который снимает весь экран, стрелок не покажет.
 //!
-//! Место окна трансляции — его видимые границы от DWM (без невидимой рамки
-//! для изменения размера), в физических пикселях: их же снимает
-//! Windows.Graphics.Capture, и в них же ставятся окна — анализатор, как и
-//! GPUI, понимает масштаб каждого монитора (манифест PerMonitorV2).
+//! Место окна трансляции — те его границы, что снял Windows.Graphics.Capture:
+//! обычно видимые границы от DWM (без невидимой рамки для изменения размера),
+//! но бывает, что и вместе с рамкой (см. `Target::poll`). Всё — в физических
+//! пикселях: в них же ставятся окна — анализатор, как и GPUI, понимает
+//! масштаб каждого монитора (манифест PerMonitorV2).
 
 use std::ffi::c_void;
 use std::time::{Duration, Instant};
@@ -34,14 +35,15 @@ use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use windows::Win32::Foundation::{COLORREF, HWND, RECT};
 use windows::Win32::Graphics::Dwm::{DWMWA_CLOAKED, DWMWA_EXTENDED_FRAME_BOUNDS, DwmGetWindowAttribute};
 use windows::Win32::UI::WindowsAndMessaging::{
-    GW_HWNDPREV, GW_OWNER, GWL_EXSTYLE, GetWindow, GetWindowLongW, GetWindowRect, HWND_TOPMOST, IsIconic,
-    IsWindow, IsWindowVisible, LWA_ALPHA, SW_HIDE, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER,
-    SWP_SHOWWINDOW, SetLayeredWindowAttributes, SetWindowDisplayAffinity, SetWindowLongW, SetWindowPos,
-    ShowWindow, WDA_EXCLUDEFROMCAPTURE, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
-    WS_EX_TRANSPARENT,
+    GW_HWNDPREV, GW_OWNER, GWL_EXSTYLE, GWL_STYLE, GetWindow, GetWindowLongW, GetWindowRect, HWND_TOPMOST,
+    IsIconic, IsWindow, IsWindowVisible, LWA_ALPHA, SW_HIDE, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE,
+    SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW, SetLayeredWindowAttributes, SetWindowDisplayAffinity,
+    SetWindowLongW, SetWindowPos, ShowWindow, WDA_EXCLUDEFROMCAPTURE, WS_CAPTION, WS_EX_LAYERED,
+    WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_MAXIMIZEBOX, WS_MINIMIZEBOX,
+    WS_POPUP, WS_SYSMENU, WS_THICKFRAME,
 };
 
-use super::place::{ScreenRect, TargetState};
+use super::place::{self, ScreenRect, TargetState};
 
 /// Переставлять окно стрелок в порядке окон — не чаще этого.
 const RESTACK: Duration = Duration::from_millis(250);
@@ -69,7 +71,13 @@ impl Target {
         Ok(Self { hwnd })
     }
 
-    pub fn poll(&mut self) -> TargetState {
+    /// Где окно трансляции. `captured` — размер окна на кадре, по которому
+    /// прочитана доска: Windows.Graphics.Capture снимает окно то по его
+    /// видимым границам, то вместе с невидимой рамкой для изменения размера —
+    /// так бывает с окном Chromium, вернувшимся из полноэкранного режима. Место
+    /// окна — те границы, что по размеру ближе к кадру, иначе стрелки легли
+    /// бы на ширину рамки мимо доски.
+    pub fn poll(&mut self, captured: Option<(f32, f32)>) -> TargetState {
         // SAFETY: только проверка, есть ли ещё окно с таким номером; окно,
         // закрытое тем временем, даст пустой ответ, а не ошибку памяти.
         if !unsafe { IsWindow(Some(self.hwnd)) }.as_bool() {
@@ -80,15 +88,18 @@ impl Target {
         if !on_screen(self.hwnd) {
             return TargetState::Hidden;
         }
-        match frame(self.hwnd) {
-            Some(rect) => TargetState::Visible(ScreenRect {
-                x: f64::from(rect.left),
-                y: f64::from(rect.top),
-                width: f64::from(rect.right - rect.left),
-                height: f64::from(rect.bottom - rect.top),
-            }),
-            None => TargetState::Hidden,
-        }
+        let Some(visible) = frame(self.hwnd).map(screen_rect) else { return TargetState::Hidden };
+        let whole = window_rect(self.hwnd).map(screen_rect);
+        TargetState::Visible(place::closest(visible, whole, captured))
+    }
+}
+
+fn screen_rect(rect: RECT) -> ScreenRect {
+    ScreenRect {
+        x: f64::from(rect.left),
+        y: f64::from(rect.top),
+        width: f64::from(rect.right - rect.left),
+        height: f64::from(rect.bottom - rect.top),
     }
 }
 
@@ -197,10 +208,16 @@ fn covers(window: HWND, board: RECT) -> bool {
     if !shown || ex_style(window) & WS_EX_TRANSPARENT.0 != 0 {
         return false;
     }
+    let near = window_rect(window).is_some_and(|rect| intersects(rect, board));
+    near && frame(window).is_none_or(|frame| intersects(frame, board)) && !cloaked(window)
+}
+
+/// Границы окна вместе с рамкой — у окна стрелок рамки нет.
+fn window_rect(hwnd: HWND) -> Option<RECT> {
     let mut rect = RECT::default();
     // SAFETY: Windows пишет в `rect` один RECT.
-    let near = unsafe { GetWindowRect(window, &raw mut rect) }.is_ok() && intersects(rect, board);
-    near && frame(window).is_none_or(|frame| intersects(frame, board)) && !cloaked(window)
+    unsafe { GetWindowRect(hwnd, &raw mut rect) }.ok()?;
+    Some(rect)
 }
 
 fn intersects(a: RECT, b: RECT) -> bool {
@@ -220,8 +237,6 @@ fn raise_to_topmost(hwnd: HWND) -> Result<()> {
 pub struct Native {
     hwnd: HWND,
     shown: bool,
-    /// Где окно стоит сейчас — чтобы не двигать его на то же место.
-    placed: Option<(i32, i32, u32, u32)>,
     /// Когда окно стрелок в последний раз переставляли в порядке окон.
     restacked: Option<Instant>,
 }
@@ -234,11 +249,11 @@ impl Native {
         let RawWindowHandle::Win32(handle) = HasWindowHandle::window_handle(window)?.as_raw() else {
             bail!("окно не из Win32");
         };
-        Ok(Self { hwnd: HWND(handle.hwnd.get() as *mut c_void), shown: false, placed: None, restacked: None })
+        Ok(Self { hwnd: HWND(handle.hwnd.get() as *mut c_void), shown: false, restacked: None })
     }
 
-    /// Прозрачное для мыши окно-инструмент, которое не становится активным и
-    /// не видно захвату экрана.
+    /// Прозрачное для мыши окно-инструмент без рамки, которое не становится
+    /// активным и не видно захвату экрана.
     pub fn prepare(&mut self) -> Result<()> {
         let hwnd = self.hwnd;
         // SAFETY: `hwnd` — живое окно GPUI (закрывает его только ведущий,
@@ -248,12 +263,32 @@ impl Native {
             let clicks_through =
                 WS_EX_LAYERED.0 | WS_EX_TRANSPARENT.0 | WS_EX_NOACTIVATE.0 | WS_EX_TOOLWINDOW.0;
             SetWindowLongW(hwnd, GWL_EXSTYLE, (style | clicks_through) as i32);
+            // Всплывающее окно GPUI создаёт без `WS_POPUP`, и Windows даёт ему
+            // заголовок с рамкой. Заголовок GPUI убирает, а рамка остаётся:
+            // рисовать можно было бы только внутри неё — на 8 пикселей уже и
+            // ниже окна, и стрелки легли бы мимо клеток трансляции. Без рамки
+            // окно рисует ровно на своём месте.
+            let style = GetWindowLongW(hwnd, GWL_STYLE) as u32;
+            let framed = WS_CAPTION.0 | WS_THICKFRAME.0 | WS_SYSMENU.0 | WS_MINIMIZEBOX.0 | WS_MAXIMIZEBOX.0;
+            SetWindowLongW(hwnd, GWL_STYLE, ((style & !framed) | WS_POPUP.0) as i32);
+            SetWindowPos(
+                hwnd,
+                None,
+                0,
+                0,
+                0,
+                0,
+                SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+            )?;
             // Слоистое окно без атрибутов не рисуется совсем; полная
             // непрозрачность слоя — а прозрачность рисует GPUI.
             SetLayeredWindowAttributes(hwnd, COLORREF(0), 255, LWA_ALPHA)?;
             // До Windows 10 2004 такого запрета нет — стрелки тогда видны и
-            // захвату всего экрана.
-            if let Err(error) = SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE) {
+            // захвату всего экрана. Проверкам, которые снимают экран, стрелки
+            // нужны на снимках: им — `ANALYZER_OVERLAY_CAPTURABLE`.
+            if std::env::var_os("ANALYZER_OVERLAY_CAPTURABLE").is_some() {
+                tracing::info!("the overlay is visible to screen capture on request");
+            } else if let Err(error) = SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE) {
                 tracing::info!(%error, "the overlay stays visible to screen capture");
             }
         }
@@ -276,7 +311,10 @@ impl Native {
         // рисует.
         let now = Instant::now();
         let restack = !stacked && self.restacked.is_none_or(|at| now.duration_since(at) >= RESTACK);
-        if self.shown && !restack && self.placed == Some((x, y, width, height)) {
+        // Место сверяется с настоящим, а не с тем, куда окно ставили: GPUI
+        // двигает его и сам — например, подгоняет размер, когда окно
+        // переходит на монитор с другим масштабом.
+        if self.shown && !restack && window_rect(self.hwnd) == Some(board) {
             return Ok(());
         }
         let mut flags = SWP_NOACTIVATE | SWP_SHOWWINDOW;
@@ -303,7 +341,6 @@ impl Native {
             self.restacked = Some(now);
         }
         self.shown = true;
-        self.placed = Some((x, y, width, height));
         Ok(())
     }
 

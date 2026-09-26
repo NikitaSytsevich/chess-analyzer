@@ -79,7 +79,9 @@ impl Target {
         Ok(Self { connection, root, window })
     }
 
-    pub fn poll(&mut self) -> TargetState {
+    /// `_captured` — размер окна на кадре захвата: на X11 место окна
+    /// одно, выбирать не из чего (см. `windows::Target::poll`).
+    pub fn poll(&mut self, _captured: Option<(f32, f32)>) -> TargetState {
         // Окна нет — сервер ответит ошибкой на любой запрос о нём.
         self.state().unwrap_or(TargetState::Gone)
     }

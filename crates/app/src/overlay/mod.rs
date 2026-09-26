@@ -111,6 +111,8 @@ pub fn open(cx: &mut App) -> anyhow::Result<Follower> {
         shown: false,
         greet: true,
         failing: false,
+        unplaced: None,
+        wanted: false,
     })
 }
 
@@ -136,6 +138,11 @@ pub struct Follower {
     greet: bool,
     /// Система отказала в показе — сказано в журнал, повторять не нужно.
     failing: bool,
+    /// Доска прочитана, но на экран не легла: что сообщила система об окне
+    /// трансляции и на окне какого размера доску видели. Сказано в журнал.
+    unplaced: Option<(TargetState, Option<(f32, f32)>)>,
+    /// Есть ли что показать (доска прочитана, анализ идёт) — для журнала.
+    wanted: bool,
 }
 
 impl Follower {
@@ -150,6 +157,10 @@ impl Follower {
     /// сдвигает за окном трансляции или прячет. Возвращает, когда сверить
     /// снова. Вызывать вне обновлений GPUI (см. [`Follower`]).
     pub fn follow(&mut self, want: Option<Want>, cx: &mut AsyncApp) -> Duration {
+        if want.is_some() != self.wanted {
+            self.wanted = want.is_some();
+            tracing::debug!(wanted = self.wanted, "arrows over the broadcast");
+        }
         let located = want.and_then(|want| Some((self.locate(&want)?, want)));
         let Some((rect, want)) = located else {
             self.hide();
@@ -187,10 +198,18 @@ impl Follower {
             self.greet = true;
         }
         let Some((_, Some(target))) = self.target.as_mut() else { return None };
-        match target.poll() {
+        let state = target.poll(want.board.window);
+        let placed = match state {
             TargetState::Visible(window) => place::board_on_screen(window, &want.board),
             TargetState::Hidden | TargetState::Gone => None,
+        };
+        // Почему стрелок нет, хотя доска прочитана, — в журнал, по разу.
+        let unplaced = placed.is_none().then_some((state, want.board.window));
+        if unplaced.is_some() && unplaced != self.unplaced {
+            tracing::debug!(?state, board = ?want.board, "the board is read but not placed on the screen");
         }
+        self.unplaced = unplaced;
+        placed
     }
 
     fn hide(&mut self) {
