@@ -20,7 +20,7 @@ mod slot;
 pub mod synth;
 
 pub use color::Rgb;
-pub use frame::{Frame, PixelRect};
+pub use frame::{Frame, FrameSource, PixelRect, WindowRect};
 pub use grid::{Grid, grid_candidates, locate_grid, locate_grid_with};
 pub use pieces::{BUNDLED, PieceSet, bundled_sets, bundled_svg, render_svg, render_svg_bgra};
 pub use recognizer::{

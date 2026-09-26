@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 
 use analyzer_chess::{Chess, Game, Position};
 use analyzer_tracker::{GameEvent, Tracker, TrackerConfig};
-use analyzer_vision::{FrameSlot, LEARNED_SET, Observation, Orientation, Recognizer};
+use analyzer_vision::{FrameSlot, LEARNED_SET, Observation, Orientation, Recognizer, WindowRect};
 
 /// Команды потоку зрения.
 pub(crate) enum VisionControl {
@@ -35,6 +35,19 @@ pub struct RecognitionStatus {
     pub frame_time: Duration,
     /// Последняя распознанная доска — чтобы показать, какие клетки неуверенны.
     pub observation: Option<Arc<Observation>>,
+    /// Где эта доска на окне трансляции — если кадр из окна.
+    pub board: Option<BoardOnWindow>,
+}
+
+/// Где доска на окне трансляции: по этому месту стрелки ложатся поверх неё.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BoardOnWindow {
+    /// Доска, в единицах окна (точках на macOS, пикселях на Windows и
+    /// Linux) от его левого верхнего угла.
+    pub rect: WindowRect,
+    /// Размер окна в тех же единицах, когда доску там видели. `None` —
+    /// захват за размером окна не следит.
+    pub window: Option<(f32, f32)>,
 }
 
 /// Статус уходит интерфейсу не чаще пяти раз в секунду.
@@ -100,6 +113,12 @@ pub(crate) fn run(
                 None
             }
         };
+        // Место доски на окне — по кадру, на котором её только что прочитали.
+        let board = observation.as_ref().and(recognizer.grid()).and_then(|grid| {
+            let side = grid.side();
+            let rect = frame.to_window(WindowRect { x: grid.x0, y: grid.y0, width: side, height: side })?;
+            Some(BoardOnWindow { rect, window: frame.source()?.window })
+        });
         if let Some(observation) = &observation {
             let changes = tracker.observe(observation, frame.captured_at());
             // Новую партию трекер мог начать с доски, прочитанной другой
@@ -132,6 +151,7 @@ pub(crate) fn run(
                 orientation: recognizer.orientation(),
                 frame_time: started.elapsed(),
                 observation: observation.map(Arc::new),
+                board,
             };
             let _ = output.send(VisionOutput::Status(status));
         }

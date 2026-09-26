@@ -4,7 +4,7 @@ use screencapturekit::content_sharing_picker::{
 };
 use screencapturekit::prelude::SCContentFilter;
 
-use crate::CaptureError;
+use crate::{CaptureError, NativeWindow};
 
 /// Окно, которое комментатор выбрал для захвата.
 #[derive(Clone)]
@@ -16,11 +16,18 @@ pub struct Source {
     pub size_points: (f64, f64),
     /// Сколько пикселей в одной точке: 2 на Retina.
     pub scale: f64,
+    /// Номер окна CoreGraphics — по нему стрелки находят окно на экране.
+    pub(crate) window_id: Option<u32>,
 }
 
 impl Source {
     pub fn pixel_size(&self) -> (u32, u32) {
         ((self.size_points.0 * self.scale).round() as u32, (self.size_points.1 * self.scale).round() as u32)
+    }
+
+    /// Номер выбранного окна (см. [`NativeWindow`]).
+    pub fn native_window(&self) -> Option<NativeWindow> {
+        self.window_id.map(|id| NativeWindow(u64::from(id)))
     }
 }
 
@@ -30,6 +37,7 @@ impl std::fmt::Debug for Source {
             .field("title", &self.title)
             .field("size_points", &self.size_points)
             .field("scale", &self.scale)
+            .field("window_id", &self.window_id)
             .finish_non_exhaustive()
     }
 }
@@ -62,6 +70,7 @@ pub fn pick_source(on_done: impl FnOnce(Result<Option<Source>, CaptureError>) + 
                     title,
                     size_points: picked.size(),
                     scale: picked.scale().max(1.0),
+                    window_id: picked.windows().first().map(|window| window.window_id()),
                 }))
             }
             SCPickerOutcome::Cancelled => Ok(None),

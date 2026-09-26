@@ -4,16 +4,23 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use analyzer_chess::{
     Assessment, CastlingMode, Color, Ending, Game, Move, MoveClass, Position, Score, Square, UciMove,
     game_accuracy, move_accuracy,
 };
 use analyzer_engine::AnalysisUpdate;
-use analyzer_session::{Event, GameEvent, Hint, RecognitionStatus};
+use analyzer_session::{BoardOnWindow, Event, GameEvent, Hint, RecognitionStatus};
 
 /// Сколько подсказок держать в ленте.
 const HINTS_KEPT: usize = 30;
+/// Доска прочитана уверенно — дальше этой средней уверенности. Тот же
+/// порог, что красит состояние доски в заголовке зелёным.
+pub const CONFIDENT: f32 = 0.6;
+/// Неуверенность короче этого — ещё не повод прятать стрелки поверх
+/// трансляции: так выглядит каждый ход, пока фигура едет по доске.
+const DOUBT: Duration = Duration::from_millis(700);
 
 #[derive(Default)]
 pub struct Model {
@@ -28,6 +35,11 @@ pub struct Model {
     pub assessments: HashMap<usize, (Assessment, Option<Move>)>,
     pub hints: VecDeque<Hint>,
     pub recognition: Option<RecognitionStatus>,
+    /// Где доска на окне трансляции, когда её в последний раз прочитали
+    /// уверенно.
+    confident_board: Option<BoardOnWindow>,
+    /// С каких пор доску не видно или читается она неуверенно.
+    doubtful_since: Option<Instant>,
     pub engine_name: Option<String>,
     pub engine_error: Option<String>,
 }
@@ -74,7 +86,18 @@ impl Model {
                 self.hints.push_front(hint);
                 self.hints.truncate(HINTS_KEPT);
             }
-            Event::Recognition(status) => self.recognition = Some(status),
+            Event::Recognition(status) => {
+                match status.board.filter(|_| status.board_found && status.mean_confidence > CONFIDENT) {
+                    Some(board) => {
+                        self.confident_board = Some(board);
+                        self.doubtful_since = None;
+                    }
+                    None => {
+                        self.doubtful_since.get_or_insert_with(Instant::now);
+                    }
+                }
+                self.recognition = Some(status);
+            }
         }
     }
 
@@ -132,6 +155,23 @@ impl Model {
     pub fn current_hint(&self) -> Option<&Hint> {
         let now = self.game.as_ref()?.len();
         self.hints.iter().find(|hint| hint.ply <= now && hint.ply + 1 >= now)
+    }
+
+    /// Где доска на окне трансляции — если месту доски и позиции на ней
+    /// можно верить в момент `now`: доску прочитали уверенно, а сомнения
+    /// (если есть) начались совсем недавно. Иначе стрелки поверх трансляции
+    /// легли бы мимо доски: например, окно трансляции изменило размер, а
+    /// сетка доски ещё прежняя.
+    pub fn trusted_board(&self, now: Instant) -> Option<BoardOnWindow> {
+        let recent = self.doubtful_since.is_none_or(|since| now.duration_since(since) < DOUBT);
+        self.confident_board.filter(|_| recent)
+    }
+
+    /// Доску ищут заново (другое окно, другая раскладка): прежнее её место
+    /// больше ничего не значит.
+    pub fn forget_board(&mut self) {
+        self.confident_board = None;
+        self.doubtful_since = None;
     }
 
     /// Класс последнего хода для значка на доске: номер полухода, клетка,
@@ -291,6 +331,44 @@ mod tests {
         // была к позиции после 1.e4, снова к месту.
         model.apply(Event::Game { game: game(&["e2e4"]), change: GameEvent::TookBack { to_ply: 1 } });
         assert_eq!(model.current_hint().map(|h| h.ply), Some(1));
+    }
+
+    #[test]
+    fn the_board_place_is_trusted_only_while_the_board_reads_confidently() {
+        use analyzer_vision::WindowRect;
+
+        let seen = |confidence: f32, x: f32| {
+            Event::Recognition(RecognitionStatus {
+                board_found: true,
+                mean_confidence: confidence,
+                set: None,
+                orientation: None,
+                frame_time: Duration::ZERO,
+                observation: None,
+                board: Some(BoardOnWindow {
+                    rect: WindowRect { x, y: 10.0, width: 400.0, height: 400.0 },
+                    window: Some((1280.0, 800.0)),
+                }),
+            })
+        };
+        let mut model = Model::default();
+        let now = Instant::now();
+        assert_eq!(model.trusted_board(now), None, "nothing seen yet");
+        model.apply(seen(0.9, 20.0));
+        assert_eq!(model.trusted_board(now).map(|b| b.rect.x), Some(20.0));
+
+        // Доску прочитали неуверенно (фигура едет по доске): недолго верим
+        // прежнему месту, и стрелки не мигают на каждом ходу…
+        model.apply(seen(0.3, 90.0));
+        assert_eq!(model.trusted_board(Instant::now()).map(|b| b.rect.x), Some(20.0));
+        // …а долгие сомнения стрелки прячут: доска, скорее всего, уже не там.
+        assert_eq!(model.trusted_board(Instant::now() + DOUBT), None);
+
+        // Уверенно прочитанная доска на новом месте — снова верим.
+        model.apply(seen(0.95, 40.0));
+        assert_eq!(model.trusted_board(Instant::now() + DOUBT).map(|b| b.rect.x), Some(40.0));
+        model.forget_board();
+        assert_eq!(model.trusted_board(Instant::now()), None, "the board is being searched anew");
     }
 
     #[test]

@@ -129,11 +129,7 @@ pub fn board(props: BoardProps<'_>) -> impl IntoElement {
         .child(
             canvas(
                 move |bounds, _, _| measured.set(f32::from(bounds.size.width)),
-                move |bounds, (), window, _| {
-                    for (from, to, color) in arrows.iter().rev() {
-                        paint_arrow(window, bounds, *from, *to, hexa(*color), white_bottom);
-                    }
-                },
+                move |bounds, (), window, _| paint_arrows(window, bounds, &arrows, white_bottom, false),
             )
             .absolute()
             .inset_0()
@@ -165,7 +161,7 @@ fn last_move_tint(badge: Option<Badge>, square: Square) -> AnyElement {
 ///
 /// Знак внутри — векторный (см. `assets`): звезда, галочка и `?!` одного
 /// веса и ровно по центру кружка при любом его размере.
-fn badge_views(badge: Badge, side: f32, white_bottom: bool) -> Vec<AnyElement> {
+pub(crate) fn badge_views(badge: Badge, side: f32, white_bottom: bool) -> Vec<AnyElement> {
     if side <= 0.0 {
         return Vec::new();
     }
@@ -295,6 +291,21 @@ fn center(bounds: Bounds<Pixels>, square: Square, white_bottom: bool) -> Point<P
     point(bounds.origin.x + px((col + 0.5) * side), bounds.origin.y + px((row + 0.5) * side))
 }
 
+/// Стрелки линий движка поверх доски `bounds`: лучшая — сверху. `halo` —
+/// тёмная кайма вокруг каждой: поверх чужой доски (трансляции) зелёная
+/// стрелка иначе теряется на зелёных клетках.
+pub(crate) fn paint_arrows(
+    window: &mut Window,
+    bounds: Bounds<Pixels>,
+    arrows: &[(Square, Square, u32)],
+    white_bottom: bool,
+    halo: bool,
+) {
+    for (from, to, color) in arrows.iter().rev() {
+        paint_arrow(window, bounds, *from, *to, hexa(*color), white_bottom, halo);
+    }
+}
+
 /// Стрелка хода: древко и треугольный наконечник одним многоугольником.
 fn paint_arrow(
     window: &mut Window,
@@ -303,6 +314,7 @@ fn paint_arrow(
     to: Square,
     color: Hsla,
     white_bottom: bool,
+    halo: bool,
 ) {
     let side = f32::from(bounds.size.width) / 8.0;
     let (a, b) = (center(bounds, from, white_bottom), center(bounds, to, white_bottom));
@@ -332,6 +344,15 @@ fn paint_arrow(
         p(neck, shaft),
         p(start, shaft),
     ];
+    if halo {
+        // Кайма — обводка того же контура, наполовину снаружи: тёмная, но
+        // прозрачная, как тень, а не как чёрный контур.
+        let mut builder = PathBuilder::stroke(px((side * 0.07).max(2.0)));
+        builder.add_polygon(&polygon, true);
+        if let Ok(path) = builder.build() {
+            window.paint_path(path, hsla(0.0, 0.0, 0.0, 0.42 * color.a.max(0.4)));
+        }
+    }
     let mut builder = PathBuilder::fill();
     builder.add_polygon(&polygon, true);
     if let Ok(path) = builder.build() {

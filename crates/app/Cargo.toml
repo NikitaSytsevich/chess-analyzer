@@ -31,12 +31,17 @@ tracing-subscriber.workspace = true
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2.workspace = true
 objc2-app-kit.workspace = true
+objc2-core-foundation.workspace = true
+objc2-core-graphics.workspace = true
 
 [target.'cfg(target_os = "windows")'.dependencies]
-windows.workspace = true
+# Dwm — видимые границы окна трансляции и то, не на другом ли оно рабочем столе.
+windows = { workspace = true, features = ["Win32_Graphics_Dwm"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-x11rb.workspace = true
+# SHAPE — пустая область ввода у окна стрелок поверх трансляции: мышь
+# проходит сквозь него.
+x11rb = { workspace = true, features = ["shape"] }
 
 [lints]
 workspace = true

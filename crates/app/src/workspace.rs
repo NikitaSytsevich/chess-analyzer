@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 use analyzer_capture::{CaptureConfig, CaptureError, CaptureSession, RegionF, Source, pick_source};
 use analyzer_chess::{
     Bitboard, CastlingMode, Chess, Color, EnPassantMode, Fen, PgnMeta, PlyAnnotation, Position, Score,
-    Square, to_pgn,
+    Square, Thresholds, to_pgn,
 };
 use analyzer_engine::{EngineOptions, locate_stockfish};
 use analyzer_session::demo::Demo;
@@ -29,7 +29,8 @@ use gpui_kit::component::{Disableable as _, Icon, Selectable as _, Sizable as _,
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
-use crate::model::Model;
+use crate::model::{self, Model};
+use crate::overlay::{self, Scene, Want};
 use crate::pieces::PieceImages;
 use crate::platform::{self, Unpinned};
 use crate::theme::{self, Palette, hex, hexa};
@@ -51,7 +52,8 @@ actions!(
         ConfirmBoard,
         ToggleDetails,
         TogglePin,
-        ToggleTheme
+        ToggleTheme,
+        ToggleOverlay
     ]
 );
 
@@ -70,6 +72,7 @@ pub fn key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("i", ToggleDetails, Some("Workspace")),
         KeyBinding::new("t", TogglePin, Some("Workspace")),
         KeyBinding::new("d", ToggleTheme, Some("Workspace")),
+        KeyBinding::new("a", ToggleOverlay, Some("Workspace")),
     ]
 }
 
@@ -165,6 +168,11 @@ pub struct Workspace {
     _appearance: Subscription,
     /// Окно закреплено поверх всех окон; внутри — каким оно было до этого.
     pinned: Option<Unpinned>,
+    /// Стрелки поверх трансляции включены (см. `overlay`).
+    overlay_on: bool,
+    /// Номер включения стрелок: ведущий окна стрелок, запущенный при
+    /// прошлом включении, видит, что он больше не нужен.
+    overlay_run: u64,
     /// Шкала оценки, сглаженная анимацией, и когда её сдвигали в последний раз.
     bar: f32,
     bar_moved: Instant,
@@ -279,6 +287,8 @@ impl Workspace {
             theme_choice: None,
             _appearance: appearance,
             pinned: None,
+            overlay_on: false,
+            overlay_run: 0,
             bar: 0.5,
             bar_moved: Instant::now(),
             capture_fps: 0.0,
@@ -349,11 +359,17 @@ impl Workspace {
         }
     }
 
+    /// Искать доску заново: раскладка трансляции сменилась или окно другое.
+    fn relocate(&mut self) {
+        self.model.forget_board();
+        self.send(Command::Relocate);
+    }
+
     /// «Оперная партия» синтетическими кадрами через весь конвейер — чтобы
     /// посмотреть анализатор без трансляции.
     pub fn start_demo(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.stop_capture(cx);
-        self.send(Command::Relocate);
+        self.relocate();
         self.demo = Some(Demo::start(Arc::clone(&self.session_slot), Duration::from_secs(3)));
         self.source_title = Some("Демо: «Оперная партия», 1858".into());
         self.phase = Phase::Live;
@@ -405,6 +421,11 @@ impl Workspace {
                     this.update_in(cx, |this, window, cx| {
                         match started {
                             Ok(capture) => {
+                                // Стрелки включены, а у нового окна их не показать —
+                                // сказать сразу, а не молча их не рисовать.
+                                if this.overlay_on && capture.native_window().is_none() {
+                                    this.warn(overlay::NO_WINDOW, cx);
+                                }
                                 this.capture = Some(capture);
                                 this.phase = Phase::Placing(Placing::default());
                                 fit_placing(window);
@@ -509,7 +530,7 @@ impl Workspace {
             return;
         }
         capture.set_target(Arc::clone(&self.session_slot));
-        self.send(Command::Relocate);
+        self.relocate();
         self.phase = Phase::Live;
         self.fit_live(window);
         cx.notify();
@@ -589,6 +610,64 @@ impl Workspace {
             Ok(text) => self.flash(text, cx),
             Err(error) => self.warn(format!("Не удалось изменить уровень окна: {error:#}"), cx),
         }
+    }
+
+    /// Стрелки лучших ходов и значки оценки ходов прямо поверх трансляции —
+    /// включить или убрать (см. `overlay`).
+    fn toggle_overlay(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.overlay_on {
+            // Ведущий окна стрелок заметит это и закроет окно сам.
+            self.overlay_on = false;
+            self.flash("Стрелки с трансляции убраны", cx);
+            return;
+        }
+        if self.demo.is_some() {
+            self.flash("У демо-партии нет окна трансляции — стрелкам некуда лечь", cx);
+            return;
+        }
+        let Some(capture) = &self.capture else {
+            self.flash("Сначала подключите трансляцию", cx);
+            return;
+        };
+        if let Some(reason) = overlay::unavailable(window) {
+            self.warn(reason, cx);
+            return;
+        }
+        if capture.native_window().is_none() {
+            self.warn(overlay::NO_WINDOW, cx);
+            return;
+        }
+        self.overlay_on = true;
+        self.overlay_run += 1;
+        let run = self.overlay_run;
+        cx.spawn(async move |this, cx| follow_overlay(this, run, cx).await).detach();
+        self.flash("Стрелки и значки ходов — поверх трансляции", cx);
+    }
+
+    /// Что показать поверх трансляции сейчас. Внешний `None` — стрелки
+    /// выключены (или включены заново — другим ведущим); внутренний — их
+    /// сейчас не показать: доска не видна, анализ на паузе, трансляции нет.
+    fn overlay_want(&self, run: u64) -> Option<Option<Want>> {
+        if !self.overlay_on || run != self.overlay_run {
+            return None;
+        }
+        let want = || -> Option<Want> {
+            if !matches!(self.phase, Phase::Live) || self.paused || self.demo.is_some() {
+                return None;
+            }
+            let window = self.capture.as_ref()?.native_window()?;
+            let board = self.model.trusted_board(Instant::now())?;
+            let game = self.model.game.as_ref()?;
+            let arrows = match (&self.model.analysis, self.model.ending()) {
+                (Some(analysis), None) => {
+                    overlay::arrows(analysis, game.current().turn(), &Thresholds::default())
+                }
+                _ => Vec::new(),
+            };
+            let badge = self.model.last_badge().map(|(ply, square, class)| Badge { ply, square, class });
+            Some(Want { window, board, scene: Scene { arrows, badge, white_bottom: self.white_bottom() } })
+        };
+        Some(want())
     }
 
     /// Светлая тема ↔ тёмная. Выбор комментатора держится до конца работы
@@ -723,6 +802,7 @@ impl Workspace {
             Button::new(id).ghost().small().icon(icon).tooltip(tooltip).text_color(muted)
         };
         let pinned = self.pinned.is_some();
+        let overlay_on = self.overlay_on;
         let dark = p.dark;
         div()
             // Заголовок целиком — область перетаскивания окна. На Windows
@@ -770,6 +850,24 @@ impl Workspace {
                         if dark { "Светлая тема (D)" } else { "Тёмная тема (D)" }.into(),
                     )
                     .on_click(cx.listener(|this, _, window, cx| this.toggle_theme(window, cx))),
+                )
+            })
+            .when(live, |this| {
+                // Как и булавка, включённые стрелки горят акцентом.
+                this.child(
+                    tool(
+                        "overlay",
+                        Icon::new(IconName::Layers2)
+                            .when(overlay_on, |icon| icon.text_color(hex(p.accent_text))),
+                        if overlay_on {
+                            "Убрать стрелки с трансляции (A)"
+                        } else {
+                            "Стрелки на трансляции (A)"
+                        }
+                        .into(),
+                    )
+                    .selected(overlay_on)
+                    .on_click(cx.listener(|this, _, window, cx| this.toggle_overlay(window, cx))),
                 )
             })
             .child(
@@ -824,7 +922,7 @@ impl Workspace {
         let board = match self.model.recognition.as_ref() {
             Some(r) if r.board_found => status(
                 p,
-                if r.mean_confidence > 0.6 { p.live } else { p.caution },
+                if r.mean_confidence > model::CONFIDENT { p.live } else { p.caution },
                 format!("Доска {:.0}%", r.mean_confidence * 100.0).into(),
                 None,
             ),
@@ -976,6 +1074,7 @@ impl Workspace {
                     .child(key_hint(p, "Пробел", "пауза"))
                     .child(key_hint(p, "F", "перевернуть"))
                     .child(key_hint(p, "I", "только доска"))
+                    .child(key_hint(p, "A", "стрелки на трансляции"))
                     .child(key_hint(p, "T", "поверх окон"))
                     .child(key_hint(p, "D", "тема")),
             )
@@ -1218,6 +1317,35 @@ impl Workspace {
     }
 }
 
+/// Ведёт окно стрелок поверх трансляции, пока стрелки включены и живо окно
+/// анализатора. Всё, что двигает окно стрелок, — между обновлениями GPUI, не
+/// внутри них (см. `overlay::Follower`).
+async fn follow_overlay(this: WeakEntity<Workspace>, run: u64, cx: &mut AsyncApp) {
+    // Стрелки не вышли — они выключаются, и комментатор узнаёт почему.
+    let failed = |text: String, cx: &mut AsyncApp| {
+        let _ = this.update(cx, |this, cx| {
+            if this.overlay_run == run {
+                this.overlay_on = false;
+                this.warn(text, cx);
+            }
+        });
+    };
+    let mut follower = match cx.update(overlay::open) {
+        Ok(follower) => follower,
+        Err(error) => return failed(format!("Не удалось показать стрелки на трансляции: {error:#}"), cx),
+    };
+    if let Err(error) = follower.prepare() {
+        follower.close(cx);
+        return failed(format!("Не удалось сделать стрелки прозрачными для мыши: {error:#}"), cx);
+    }
+    loop {
+        let Ok(Some(want)) = this.update(cx, |this, _| this.overlay_want(run)) else { break };
+        let pause = follower.follow(want, cx);
+        cx.background_executor().timer(pause).await;
+    }
+    follower.close(cx);
+}
+
 /// Расширяет окно под экран «Где доска?», если оно уже, чем нужно.
 fn fit_placing(window: &mut Window) {
     if window.is_fullscreen() {
@@ -1310,7 +1438,7 @@ impl Render for Workspace {
             .key_context("Workspace")
             .on_action(cx.listener(|this, _: &TogglePause, _, cx| this.toggle_pause(cx)))
             .on_action(cx.listener(|this, _: &Flip, _, _| this.send(Command::Flip)))
-            .on_action(cx.listener(|this, _: &Relocate, _, _| this.send(Command::Relocate)))
+            .on_action(cx.listener(|this, _: &Relocate, _, _| this.relocate()))
             .on_action(cx.listener(|this, _: &PickSource, _, cx| this.pick(cx)))
             .on_action(cx.listener(|this, _: &CopyFen, _, cx| this.copy_fen(cx)))
             .on_action(cx.listener(|this, _: &CopyPgn, _, cx| this.copy_pgn(cx)))
@@ -1318,6 +1446,7 @@ impl Render for Workspace {
             .on_action(cx.listener(|this, _: &ConfirmBoard, window, cx| this.confirm_board(window, cx)))
             .on_action(cx.listener(|this, _: &TogglePin, window, cx| this.toggle_pin(window, cx)))
             .on_action(cx.listener(|this, _: &ToggleTheme, window, cx| this.toggle_theme(window, cx)))
+            .on_action(cx.listener(|this, _: &ToggleOverlay, window, cx| this.toggle_overlay(window, cx)))
             .on_action(cx.listener(|this, _: &ToggleDetails, window, cx| {
                 if matches!(this.phase, Phase::Live) {
                     this.toggle_details(window, cx);

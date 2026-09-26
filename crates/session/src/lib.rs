@@ -22,7 +22,7 @@ use analyzer_vision::FrameSlot;
 pub use analyzer_tracker::{GameEvent, StartReason};
 
 pub use crate::hints::{Hint, HintKind};
-pub use crate::vision_loop::RecognitionStatus;
+pub use crate::vision_loop::{BoardOnWindow, RecognitionStatus};
 use crate::vision_loop::{VisionControl, VisionOutput};
 
 #[derive(Clone, Debug)]

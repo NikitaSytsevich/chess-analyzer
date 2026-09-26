@@ -17,7 +17,7 @@ use std::thread::JoinHandle;
 use analyzer_vision::FrameSlot;
 
 use self::relay::Relay;
-use crate::{CaptureConfig, CaptureError, CaptureStats, RegionF};
+use crate::{CaptureConfig, CaptureError, CaptureStats, NativeWindow, RegionF};
 
 /// Окно, которое комментатор выбрал для захвата.
 pub struct Source {
@@ -37,6 +37,15 @@ impl Source {
         match &self.kind {
             Kind::Portal(picked) => picked.size,
             Kind::X11(picked) => picked.size,
+        }
+    }
+
+    /// Окно X11. Портал рабочего стола не сообщает, какое окно выбрано, —
+    /// тогда `None`.
+    pub fn native_window(&self) -> Option<NativeWindow> {
+        match &self.kind {
+            Kind::Portal(_) => None,
+            Kind::X11(picked) => Some(NativeWindow(u64::from(picked.window))),
         }
     }
 }
@@ -85,6 +94,7 @@ fn pick() -> Result<Option<Source>, CaptureError> {
 pub struct CaptureSession {
     title: String,
     size: (u32, u32),
+    native: Option<NativeWindow>,
     relay: Arc<Relay>,
     /// Сигнал потоку PipeWire: его главный цикл ждёт событий и сам не
     /// проснётся. Опросу X11 хватает `relay.stop()`.
@@ -102,6 +112,7 @@ impl CaptureSession {
         on_stop: impl Fn(Option<String>) + Send + Sync + 'static,
     ) -> Result<Self, CaptureError> {
         let size = source.pixel_size();
+        let native = source.native_window();
         let relay = Arc::new(Relay::new(config, slot));
         let on_stop: Arc<dyn Fn(Option<String>) + Send + Sync> = Arc::new(on_stop);
         let spawn = |name: &str, job: Box<dyn FnOnce() + Send>| {
@@ -138,7 +149,7 @@ impl CaptureSession {
             }
         }
         tracing::info!(title = %source.title, ?config, "capture started");
-        Ok(Self { title: source.title, size, relay, stop_pipewire, threads })
+        Ok(Self { title: source.title, size, native, relay, stop_pipewire, threads })
     }
 
     /// Заголовок окна, которое захватывается.
@@ -149,6 +160,11 @@ impl CaptureSession {
     /// Размер окна в пикселях на момент выбора.
     pub fn pixel_size(&self) -> (u32, u32) {
         self.size
+    }
+
+    /// Окно трансляции для системы (см. [`NativeWindow`]).
+    pub fn native_window(&self) -> Option<NativeWindow> {
+        self.native
     }
 
     /// Переключает захват на область окна (или на окно целиком).

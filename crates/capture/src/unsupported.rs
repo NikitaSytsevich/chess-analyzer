@@ -5,7 +5,7 @@
 use std::convert::Infallible;
 use std::sync::Arc;
 
-use crate::{CaptureConfig, CaptureError, CaptureStats, FrameSlot, RegionF};
+use crate::{CaptureConfig, CaptureError, CaptureStats, FrameSlot, NativeWindow, RegionF};
 
 /// Окно трансляции. Здесь его не получить: выбор окна недоступен.
 #[derive(Clone, Debug)]
@@ -41,6 +41,10 @@ impl CaptureSession {
     }
 
     pub fn source(&self) -> &Source {
+        match self.never {}
+    }
+
+    pub fn native_window(&self) -> Option<NativeWindow> {
         match self.never {}
     }
 
