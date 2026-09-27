@@ -60,8 +60,14 @@ impl Model {
                     GameEvent::Moved { .. } | GameEvent::Lost => {}
                 }
                 self.evals.resize(game.len() + 1, None);
-                self.analysis = None;
-                self.finished = false;
+                // Доску не узнать — над ней стрелка комментатора, курсор или
+                // кадр анимации, — но позиция партии та же, и анализ к ней в
+                // силе. Сбросить его нельзя: движок, закончивший позицию,
+                // нового не пришлёт, и стрелки пропали бы до следующего хода.
+                if change != GameEvent::Lost {
+                    self.analysis = None;
+                    self.finished = false;
+                }
                 self.game = Some(game);
             }
             Event::Analysis(update) => {
@@ -250,6 +256,21 @@ mod tests {
         model.apply(Event::Game { game: game(&["e2e4"]), change: GameEvent::TookBack { to_ply: 1 } });
         assert_eq!(model.evals, [Some(Score::Cp(20)), None]);
         assert!(model.analysis.is_none(), "analysis of the old position is dropped");
+    }
+
+    #[test]
+    fn a_board_that_is_not_recognized_for_a_moment_keeps_the_analysis() {
+        let mut model = Model::default();
+        let one = game(&["e2e4"]);
+        model.apply(Event::Game {
+            game: Arc::clone(&one),
+            change: GameEvent::Started { position: one.current().clone(), reason: StartReason::First },
+        });
+        model.apply(analysis(30));
+        model.apply(Event::AnalysisFinished { id: PositionId(1), depth: 20 });
+        model.apply(Event::Game { game: Arc::clone(&one), change: GameEvent::Lost });
+        assert!(model.analysis.is_some(), "the arrows stay: the position is the same");
+        assert!(model.finished);
     }
 
     #[test]
