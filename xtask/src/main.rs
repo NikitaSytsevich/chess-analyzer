@@ -1,14 +1,18 @@
 //! `cargo xtask <команда>` — всё, что нужно сделать с проектом, кроме самого
-//! кода: скачать Stockfish, собрать приложение, запустить, прогнать проверки.
+//! кода: скачать движки, собрать приложение, запустить, прогнать проверки.
 //!
 //! Приложение собирается под систему, на которой идёт сборка:
 //!
 //! - macOS — `.app` с ad-hoc подписью; инструменты — из Command Line Tools
 //!   (`curl`, `tar`, `lipo`, `codesign`), Xcode не нужен;
-//! - Windows — папка с программой и движком; `curl` и `tar` есть в самой
+//! - Windows — папка с программой и движками; `curl` и `tar` есть в самой
 //!   Windows 10 и 11;
-//! - Linux — папка с программой, движком, иконкой и `install.sh`, который
+//! - Linux — папка с программой, движками, иконкой и `install.sh`, который
 //!   добавляет ярлык в меню приложений.
+//!
+//! Движков два: Stockfish 19 и Reckless 0.9 (см. `analyzer_engine::Bundled`).
+//! Reckless собран для x86-64 с AVX2 и для Apple Silicon — под Windows и
+//! Linux на ARM программа выходит с одним Stockfish.
 //!
 //! Контрольные суммы считаются здесь же, на Rust, — одинаково везде.
 
@@ -41,11 +45,15 @@ struct StockfishAsset {
 }
 
 impl StockfishAsset {
-    fn url(&self) -> String {
-        format!(
-            "https://github.com/official-stockfish/Stockfish/releases/download/{STOCKFISH_VERSION}/{}",
-            self.archive
-        )
+    fn download(&self) -> Asset {
+        Asset {
+            url: format!(
+                "https://github.com/official-stockfish/Stockfish/releases/download/{STOCKFISH_VERSION}/{}",
+                self.archive
+            ),
+            sha256: self.sha256,
+            megabytes: self.megabytes,
+        }
     }
 }
 
@@ -85,15 +93,74 @@ fn stockfish_asset() -> Result<StockfishAsset> {
     })
 }
 
+/// Reckless 0.9, официальный релиз.
+const RECKLESS_VERSION: &str = "v0.9.0";
+
+/// Сборка Reckless под систему, на которой собирается приложение, — файл
+/// как есть, без архива; суммы — файлов этого релиза. Для
+/// x86-64 — сборка под AVX2: она есть у всех процессоров последних десяти с
+/// лишним лет (приложение проверяет это само и без AVX2 Reckless не
+/// предлагает), а сборка без AVX2 в разы медленнее. Для Windows и Linux на
+/// ARM сборок нет.
+fn reckless_asset() -> Option<Asset> {
+    let (file, sha256) = if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+        ("reckless-macos", "b50eeea3519e7da0e583a255d9d9f86096c513384818e7f01b983c14026a6a0b")
+    } else if cfg!(all(target_os = "windows", target_arch = "x86_64")) {
+        ("reckless-windows-avx2.exe", "b74ead5648cfa7a7a9f51d04566cf00f56dcf90dacd1252990906223bf1891b8")
+    } else if cfg!(all(target_os = "linux", target_arch = "x86_64")) {
+        ("reckless-linux-avx2", "09ba1634faaffec55d237a7efecfb27d5152f6f1400f24dd63af9bde00a054f6")
+    } else {
+        return None;
+    };
+    Some(Asset {
+        url: format!(
+            "https://github.com/codedeliveryservice/Reckless/releases/download/{RECKLESS_VERSION}/{file}"
+        ),
+        sha256,
+        megabytes: 62,
+    })
+}
+
+/// Лицензия Reckless (AGPL-3.0) из того же выпуска: её кладут рядом с ним.
+fn reckless_license() -> Asset {
+    Asset {
+        url: format!(
+            "https://raw.githubusercontent.com/codedeliveryservice/Reckless/{RECKLESS_VERSION}/LICENSE"
+        ),
+        sha256: "8486a10c4393cee1c25392769ddd3b2d6c242d6ec7928e1414efff7dfb2f07ef",
+        megabytes: 0,
+    }
+}
+
+/// Файл, который скачивается и сверяется с контрольной суммой.
+struct Asset {
+    url: String,
+    sha256: &'static str,
+    megabytes: u32,
+}
+
 /// Имя исполняемого файла движка в `vendor/` и рядом с приложением.
-fn stockfish_file() -> String {
-    format!("stockfish{}", env::consts::EXE_SUFFIX)
+fn engine_file(name: &str) -> String {
+    format!("{name}{}", env::consts::EXE_SUFFIX)
+}
+
+/// Движок, скачанный в `vendor/<имя>/`: исполняемый файл и рядом —
+/// `COPYING.txt` с его лицензией.
+struct Engine {
+    name: &'static str,
+    title: &'static str,
+    license: &'static str,
+    /// Где исходники этой самой версии: GPL и AGPL требуют сказать это рядом
+    /// с программой.
+    source: String,
+    binary: PathBuf,
 }
 
 fn main() -> Result<()> {
     let args: Vec<String> = env::args().skip(1).collect();
     let release = args.iter().any(|arg| arg == "--release");
     match args.first().map(String::as_str) {
+        Some("fetch-engines") => fetch_engines().map(|_| ()),
         Some("fetch-stockfish") => fetch_stockfish().map(|_| ()),
         Some("bundle") => bundle(release).map(|app| println!("{}", app.display())),
         Some("run") => run(release),
@@ -102,7 +169,8 @@ fn main() -> Result<()> {
         _ => {
             eprintln!(
                 "использование: cargo xtask <команда> [--release]\n\n\
-                 fetch-stockfish  скачать и проверить Stockfish 19 в vendor/\n\
+                 fetch-engines    скачать и проверить движки в vendor/: Stockfish 19 и Reckless 0.9\n\
+                 fetch-stockfish  только Stockfish 19\n\
                  bundle           собрать приложение в target/: «{APP_NAME}.app» на macOS,\n\
                  \x20                папка «{APP_NAME}» на Windows и Linux\n\
                  run              собрать приложение и запустить с журналом в терминале\n\
@@ -130,33 +198,58 @@ fn run_checked(command: &mut Command) -> Result<()> {
     Ok(())
 }
 
-fn fetch_stockfish() -> Result<PathBuf> {
+/// Все движки, какие есть для этой системы.
+fn fetch_engines() -> Result<Vec<Engine>> {
+    let mut engines = vec![fetch_stockfish()?];
+    engines.extend(fetch_reckless()?);
+    Ok(engines)
+}
+
+/// Движок уже скачан, и той версии, что нужна.
+fn fetched(binary: &Path, version: &str) -> bool {
+    let marker = binary.with_file_name("VERSION");
+    binary.exists() && fs::read_to_string(marker).is_ok_and(|v| v.trim() == version)
+}
+
+/// Скачивает `asset` в `to` и сверяет контрольную сумму.
+fn download(asset: &Asset, to: &Path, title: &str) -> Result<()> {
+    if asset.megabytes > 0 {
+        println!("Загружаю {title} ({} МБ)…", asset.megabytes);
+    }
+    run_checked(cmd("curl").args(["-fL", "--progress-bar", "-o"]).arg(to).arg(&asset.url))?;
+    let digest = sha256(to)?;
+    if digest != asset.sha256 {
+        fs::remove_file(to).ok();
+        bail!("контрольная сумма не совпала ({title}, {}): {digest}", asset.url);
+    }
+    Ok(())
+}
+
+fn fetch_stockfish() -> Result<Engine> {
     let asset = stockfish_asset()?;
     let dir = root().join("vendor/stockfish");
-    let binary = dir.join(stockfish_file());
-    let marker = dir.join("VERSION");
-    if binary.exists() && fs::read_to_string(&marker).is_ok_and(|v| v.trim() == STOCKFISH_VERSION) {
-        return Ok(binary);
+    let binary = dir.join(engine_file("stockfish"));
+    let engine = Engine {
+        name: "stockfish",
+        title: "Stockfish 19",
+        license: "GPL-3.0",
+        source: format!("https://github.com/official-stockfish/Stockfish/tree/{STOCKFISH_VERSION}"),
+        binary: binary.clone(),
+    };
+    if fetched(&binary, STOCKFISH_VERSION) {
+        return Ok(engine);
     }
     let downloads = root().join("vendor/downloads");
     fs::create_dir_all(&downloads)?;
     let archive = downloads.join(asset.archive);
-
-    println!("Загружаю Stockfish 19 ({} МБ)…", asset.megabytes);
-    run_checked(cmd("curl").args(["-fL", "--progress-bar", "-o"]).arg(&archive).arg(asset.url()))?;
-
-    let digest = sha256(&archive)?;
-    if digest != asset.sha256 {
-        fs::remove_file(&archive).ok();
-        bail!("контрольная сумма Stockfish не совпала: {digest}");
-    }
+    download(&asset.download(), &archive, engine.title)?;
 
     let unpacked = downloads.join("unpacked");
     fs::remove_dir_all(&unpacked).ok();
     fs::create_dir_all(&unpacked)?;
     // `tar` из macOS и из Windows (bsdtar) сам узнаёт и .tar.gz, и .zip.
     run_checked(cmd("tar").arg("-xf").arg(&archive).arg("-C").arg(&unpacked))?;
-    let engine = find_file(&unpacked, |path| {
+    let executable = find_file(&unpacked, |path| {
         path.file_name().and_then(|name| name.to_str()).is_some_and(|name| {
             name.starts_with("stockfish-")
                 && if cfg!(windows) { name.ends_with(".exe") } else { path.extension().is_none() }
@@ -168,9 +261,9 @@ fn fetch_stockfish() -> Result<PathBuf> {
     if cfg!(target_os = "macos") {
         // Универсальная сборка содержит и x86_64, и arm64. Приложение только
         // для Apple Silicon: вторая половина — лишние десятки мегабайт.
-        run_checked(cmd("lipo").arg(&engine).args(["-thin", "arm64", "-output"]).arg(&binary))?;
+        run_checked(cmd("lipo").arg(&executable).args(["-thin", "arm64", "-output"]).arg(&binary))?;
     } else {
-        fs::copy(&engine, &binary)?;
+        fs::copy(&executable, &binary)?;
     }
     if let Some(license) = find_file(&unpacked, |path| {
         path.file_name()
@@ -179,10 +272,49 @@ fn fetch_stockfish() -> Result<PathBuf> {
     }) {
         fs::copy(license, dir.join("COPYING.txt"))?;
     }
-    fs::write(&marker, STOCKFISH_VERSION)?;
+    fs::write(dir.join("VERSION"), STOCKFISH_VERSION)?;
     fs::remove_dir_all(&unpacked).ok();
     println!("Stockfish 19 готов: {}", binary.display());
-    Ok(binary)
+    Ok(engine)
+}
+
+/// Reckless — файл как есть и его лицензия. `None` — для этой системы
+/// сборки нет.
+fn fetch_reckless() -> Result<Option<Engine>> {
+    let Some(asset) = reckless_asset() else {
+        println!("Reckless для этой системы не выпускается — в приложении будет только Stockfish");
+        return Ok(None);
+    };
+    let dir = root().join("vendor/reckless");
+    let binary = dir.join(engine_file("reckless"));
+    let engine = Engine {
+        name: "reckless",
+        title: "Reckless 0.9",
+        license: "AGPL-3.0",
+        source: format!("https://github.com/codedeliveryservice/Reckless/tree/{RECKLESS_VERSION}"),
+        binary: binary.clone(),
+    };
+    if fetched(&binary, RECKLESS_VERSION) {
+        return Ok(Some(engine));
+    }
+    fs::create_dir_all(&dir)?;
+    let partial = dir.join("download.part");
+    download(&asset, &partial, engine.title)?;
+    download(&reckless_license(), &dir.join("COPYING.txt"), "лицензия Reckless")?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        fs::set_permissions(&partial, fs::Permissions::from_mode(0o755))?;
+    }
+    fs::rename(&partial, &binary)?;
+    if cfg!(target_os = "macos") {
+        // На Apple Silicon ядро не запустит неподписанную программу, а тесты
+        // и `cargo run` берут движок прямо из vendor/.
+        run_checked(cmd("codesign").args(["--force", "--sign", "-"]).arg(&binary))?;
+    }
+    fs::write(dir.join("VERSION"), RECKLESS_VERSION)?;
+    println!("Reckless 0.9 готов: {}", binary.display());
+    Ok(Some(engine))
 }
 
 fn sha256(path: &Path) -> Result<String> {
@@ -204,10 +336,10 @@ fn find_file(dir: &Path, matches: impl Fn(&Path) -> bool + Copy) -> Option<PathB
     None
 }
 
-/// Собирает приложение и складывает его вместе с движком туда, откуда его
-/// можно запустить и отдать: `.app` на macOS, папку на Windows.
+/// Собирает приложение и складывает его вместе с движками туда, откуда его
+/// можно запустить и отдать: `.app` на macOS, папку на Windows и Linux.
 fn bundle(release: bool) -> Result<PathBuf> {
-    let stockfish = fetch_stockfish()?;
+    let engines = fetch_engines()?;
     let mut build = cmd("cargo");
     build.args(["build", "--package", "analyzer-app"]);
     if release {
@@ -218,62 +350,61 @@ fn bundle(release: bool) -> Result<PathBuf> {
     let profile = if release { "release" } else { "debug" };
     let target = root().join("target").join(profile);
     if cfg!(target_os = "macos") {
-        bundle_macos(&target, &stockfish)
+        bundle_macos(&target, &engines)
     } else if cfg!(windows) {
-        bundle_windows(&target, &stockfish)
+        bundle_windows(&target, &engines)
     } else if cfg!(target_os = "linux") {
-        bundle_linux(&target, &stockfish)
+        bundle_linux(&target, &engines)
     } else {
         bail!("упаковка приложения есть только для macOS, Windows и Linux")
     }
 }
 
-fn bundle_macos(target: &Path, stockfish: &Path) -> Result<PathBuf> {
+fn bundle_macos(target: &Path, engines: &[Engine]) -> Result<PathBuf> {
     let app = target.join(format!("{APP_NAME}.app"));
     let contents = app.join("Contents");
     fs::remove_dir_all(&app).ok();
     fs::create_dir_all(contents.join("MacOS"))?;
-    fs::create_dir_all(contents.join("Resources/engines"))?;
 
     fs::copy(target.join(EXECUTABLE), contents.join("MacOS").join(EXECUTABLE))?;
-    let engine = contents.join("Resources/engines/stockfish");
-    fs::copy(stockfish, &engine)?;
-    copy_stockfish_license(stockfish, &contents.join("Resources/engines"))?;
+    let copied = copy_engines(engines, &contents.join("Resources/engines"))?;
     fs::copy(root().join("assets/icon/AppIcon.icns"), contents.join("Resources/AppIcon.icns"))?;
     fs::write(contents.join("Info.plist"), info_plist())?;
 
-    // Подпись ad-hoc, изнутри наружу: сначала вложенный движок, потом само
+    // Подпись ad-hoc, изнутри наружу: сначала вложенные движки, потом само
     // приложение. Системный выбор окна не требует разрешения «Запись экрана»,
     // поэтому постоянный сертификат не нужен.
-    run_checked(cmd("codesign").args(["--force", "--sign", "-"]).arg(&engine))?;
+    for engine in &copied {
+        run_checked(cmd("codesign").args(["--force", "--sign", "-"]).arg(engine))?;
+    }
     run_checked(cmd("codesign").args(["--force", "--sign", "-"]).arg(&app))?;
     Ok(app)
 }
 
 /// Папка приложения на Windows: программа под русским именем, рядом —
-/// `engines\stockfish.exe` (там его ищет `locate_stockfish`) и лицензии.
-fn bundle_windows(target: &Path, stockfish: &Path) -> Result<PathBuf> {
+/// `engines\stockfish.exe` и `engines\reckless.exe` (там их ищет
+/// `analyzer_engine::Bundled::locate`) и лицензии.
+fn bundle_windows(target: &Path, engines: &[Engine]) -> Result<PathBuf> {
     let folder = target.join(APP_NAME);
     fs::remove_dir_all(&folder).ok();
-    fs::create_dir_all(folder.join("engines"))?;
+    fs::create_dir_all(&folder)?;
     fs::copy(target.join(format!("{EXECUTABLE}.exe")), folder.join(format!("{APP_NAME}.exe")))?;
-    fs::copy(stockfish, folder.join("engines").join(stockfish_file()))?;
-    copy_stockfish_license(stockfish, &folder.join("engines"))?;
+    copy_engines(engines, &folder.join("engines"))?;
     fs::copy(root().join("LICENSE"), folder.join("LICENSE.txt"))?;
     Ok(folder)
 }
 
-/// Папка приложения на Linux: программа, рядом `engines/stockfish` (там его
-/// ищет `locate_stockfish`), иконка, лицензии и `install.sh` — он кладёт в
-/// меню приложений ярлык на эту папку. Программа работает и без него:
-/// папку можно запускать откуда угодно.
-fn bundle_linux(target: &Path, stockfish: &Path) -> Result<PathBuf> {
+/// Папка приложения на Linux: программа, рядом `engines/stockfish` и
+/// `engines/reckless` (там их ищет `analyzer_engine::Bundled::locate`),
+/// иконка, лицензии и `install.sh` — он кладёт в меню приложений ярлык на
+/// эту папку. Программа работает и без него: папку можно запускать откуда
+/// угодно.
+fn bundle_linux(target: &Path, engines: &[Engine]) -> Result<PathBuf> {
     let folder = target.join(APP_NAME);
     fs::remove_dir_all(&folder).ok();
-    fs::create_dir_all(folder.join("engines"))?;
+    fs::create_dir_all(&folder)?;
     fs::copy(target.join(EXECUTABLE), folder.join(EXECUTABLE))?;
-    fs::copy(stockfish, folder.join("engines").join(stockfish_file()))?;
-    copy_stockfish_license(stockfish, &folder.join("engines"))?;
+    copy_engines(engines, &folder.join("engines"))?;
     fs::copy(root().join("LICENSE"), folder.join("LICENSE.txt"))?;
     fs::copy(root().join("assets/icon/icon.png"), folder.join(format!("{EXECUTABLE}.png")))?;
     fs::write(folder.join(format!("{BUNDLE_ID}.desktop")), desktop_entry())?;
@@ -299,13 +430,13 @@ Name={APP_NAME}
 Name[en]=Chess Analyzer
 GenericName=Суфлёр комментатора шахматных трансляций
 GenericName[en]=Chess broadcast commentator's prompter
-Comment=Stockfish следит за партией в окне трансляции: оценка, лучшие ходы, ошибки
-Comment[en]=Stockfish follows the game in a broadcast window: evaluation, best moves, mistakes
+Comment=Шахматный движок следит за партией в окне трансляции: оценка, лучшие ходы, ошибки
+Comment[en]=A chess engine follows the game in a broadcast window: evaluation, best moves, mistakes
 Exec="@DIR@/{EXECUTABLE}"
 Icon={BUNDLE_ID}
 Terminal=false
 Categories=Game;BoardGame;
-Keywords=chess;stockfish;broadcast;шахматы;анализ;трансляция;
+Keywords=chess;stockfish;reckless;broadcast;шахматы;анализ;трансляция;
 StartupWMClass={BUNDLE_ID}
 "#
     )
@@ -334,12 +465,35 @@ update-desktop-database "$apps" 2>/dev/null || true
 echo "Готово: «Шахматный анализатор» — в меню приложений."
 "#;
 
-fn copy_stockfish_license(stockfish: &Path, into: &Path) -> Result<()> {
-    if let Some(license) = stockfish.parent().map(|dir| dir.join("COPYING.txt")).filter(|path| path.exists())
-    {
-        fs::copy(license, into.join("STOCKFISH-COPYING.txt"))?;
+/// Движки — в папку `into`: каждый под своим именем, рядом его лицензия
+/// (`STOCKFISH-COPYING.txt`, `RECKLESS-COPYING.txt`) и `README.txt` — какой
+/// это движок и где его исходники. Возвращает пути скопированных движков.
+fn copy_engines(engines: &[Engine], into: &Path) -> Result<Vec<PathBuf>> {
+    fs::create_dir_all(into)?;
+    let mut readme = String::from(
+        "Движки анализа. Шахматный анализатор запускает их отдельными программами\n\
+         и говорит с ними по протоколу UCI.\n",
+    );
+    let mut copied = Vec::new();
+    for engine in engines {
+        let to = into.join(engine_file(engine.name));
+        fs::copy(&engine.binary, &to)?;
+        copied.push(to);
+        let license = engine.binary.with_file_name("COPYING.txt");
+        let license_name = format!("{}-COPYING.txt", engine.name.to_uppercase());
+        if license.exists() {
+            fs::copy(license, into.join(&license_name))?;
+        }
+        readme.push_str(&format!(
+            "\n{title} — {file}\nЛицензия: {license} ({license_name}).\nИсходный код этой версии: {source}\n",
+            title = engine.title,
+            file = engine_file(engine.name),
+            license = engine.license,
+            source = engine.source,
+        ));
     }
-    Ok(())
+    fs::write(into.join("README.txt"), readme)?;
+    Ok(copied)
 }
 
 fn info_plist() -> String {

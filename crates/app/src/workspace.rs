@@ -19,12 +19,13 @@ use analyzer_chess::{
     Bitboard, CastlingMode, Chess, Color, EnPassantMode, Fen, PgnMeta, PlyAnnotation, Position, Score,
     Square, Thresholds, to_pgn,
 };
-use analyzer_engine::{EngineOptions, locate_stockfish};
+use analyzer_engine::{Bundled, EngineChoice, EngineOptions};
 use analyzer_session::demo::Demo;
 use analyzer_session::{Command, Event, Session, SessionConfig};
 use analyzer_vision::{Frame, FrameSlot, Orientation, find_board};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::menu::{DropdownMenu as _, PopupMenu, PopupMenuItem};
 use gpui_kit::component::{Disableable as _, Icon, Selectable as _, Sizable as _, TitleBar};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -34,6 +35,7 @@ use crate::overlay::{self, Scene, Want};
 use crate::pieces::PieceImages;
 use crate::platform::{self, Unpinned};
 use crate::refind;
+use crate::settings::Settings;
 use crate::theme::{self, Palette, hex, hexa};
 use crate::views::analysis::{BAR, CAPTION, Reading, caption, ending_text, eval_bar, verdict};
 use crate::views::board::{Badge, BoardProps, board};
@@ -54,7 +56,8 @@ actions!(
         ToggleDetails,
         TogglePin,
         ToggleTheme,
-        ToggleOverlay
+        ToggleOverlay,
+        NextEngine
     ]
 );
 
@@ -74,6 +77,7 @@ pub fn key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("t", TogglePin, Some("Workspace")),
         KeyBinding::new("d", ToggleTheme, Some("Workspace")),
         KeyBinding::new("a", ToggleOverlay, Some("Workspace")),
+        KeyBinding::new("e", NextEngine, Some("Workspace")),
     ]
 }
 
@@ -137,6 +141,16 @@ struct Placing {
     drag_from: Option<(f32, f32)>,
 }
 
+/// Смена движка, которая ещё не закончилась: новый движок пока не ответил.
+struct Switch {
+    /// Движок, к которому вернуться, если новый не запустится: во время
+    /// эфира без анализа нельзя.
+    fallback: EngineChoice,
+    /// Движок сменил комментатор — ответ нового стоит показать. Движок,
+    /// выбранный в прошлый раз, при запуске программы запускается молча.
+    announce: bool,
+}
+
 /// Поиск потерянной доски во всём окне трансляции.
 struct Wide {
     seen: u64,
@@ -153,6 +167,9 @@ enum Phase {
 pub struct Workspace {
     focus: FocusHandle,
     session: Option<Session>,
+    /// Что переживает перезапуск: каким движком анализировать.
+    settings: Settings,
+    engine_switch: Option<Switch>,
     session_slot: Arc<FrameSlot>,
     setup_slot: Arc<FrameSlot>,
     capture: Option<CaptureSession>,
@@ -202,39 +219,35 @@ impl Workspace {
         let (tx, messages) = flume::unbounded::<Message>();
         let session_slot = Arc::new(FrameSlot::new());
 
-        let mut notice = None;
-        let session = match locate_stockfish() {
-            Some(path) => {
-                let (session, events) =
-                    Session::start(SessionConfig::new(EngineOptions::new(path)), Arc::clone(&session_slot));
-                // События сессии идут пачками (обновления анализа — по 10 в
-                // секунду): применяем всё накопившееся и перерисовываем один раз.
-                cx.spawn_in(window, async move |this, cx| {
-                    while let Ok(first) = events.recv_async().await {
-                        let batch: Vec<Event> = std::iter::once(first).chain(events.try_iter()).collect();
-                        let alive = this.update(cx, |this, cx| {
-                            for event in batch {
-                                this.model.apply(event);
-                            }
-                            cx.notify();
-                        });
-                        if alive.is_err() {
-                            break;
-                        }
-                    }
-                })
-                .detach();
-                Some(session)
+        // Выбранный движок, а если его нет (свой движок удалили, флешку
+        // вынули) — любой из тех, что пришли с программой.
+        let mut settings = Settings::load();
+        let chosen = settings.engine.clone();
+        let found = std::iter::once(chosen.clone())
+            .chain(Bundled::ALL.map(EngineChoice::Bundled))
+            .find_map(|choice| choice.options().map(|options| (choice, options)));
+        let notice: Option<SharedString> = match &found {
+            None => Some(
+                "Движок не найден: положите Stockfish в папку engines рядом с программой, \
+                 установите его в систему, выполните `cargo xtask fetch-engines` или выберите \
+                 свой UCI-движок кнопкой с процессором"
+                    .into(),
+            ),
+            Some((running, _)) if *running != chosen => {
+                Some(format!("{} не найден — анализирует {}", chosen.title(), running.title()).into())
             }
-            None => {
-                notice = Some(
-                    "Stockfish не найден: положите его в папку engines рядом с программой, \
-                     установите в систему или выполните `cargo xtask fetch-stockfish`"
-                        .into(),
-                );
-                None
-            }
+            Some(_) => None,
         };
+        // Движок, выбранный в прошлый раз, может и не запуститься (свой
+        // движок заменили чем-то не тем): тогда анализ перейдёт на Stockfish,
+        // как после неудачной смены движка.
+        let engine_switch = found
+            .as_ref()
+            .filter(|(running, _)| *running != EngineChoice::default())
+            .map(|_| Switch { fallback: EngineChoice::default(), announce: false });
+        if let Some((running, _)) = &found {
+            settings.engine = running.clone();
+        }
 
         cx.spawn_in(window, async move |this, cx| {
             while let Ok(message) = messages.recv_async().await {
@@ -280,9 +293,11 @@ impl Workspace {
             }
         });
 
-        Self {
+        let mut workspace = Self {
             focus,
-            session,
+            session: None,
+            settings,
+            engine_switch,
             session_slot,
             setup_slot: Arc::new(FrameSlot::new()),
             capture: None,
@@ -310,6 +325,166 @@ impl Workspace {
             wide: None,
             notice,
             notice_until: None,
+        };
+        if let Some((_, options)) = found {
+            workspace.start_session(options, window, cx);
+        }
+        workspace
+    }
+
+    /// Запускает сессию анализа с движком `engine`. События сессии идут
+    /// пачками (обновления анализа — по 10 в секунду): применяем всё
+    /// накопившееся и перерисовываем один раз.
+    fn start_session(&mut self, engine: EngineOptions, window: &mut Window, cx: &mut Context<Self>) {
+        let (session, events) = Session::start(SessionConfig::new(engine), Arc::clone(&self.session_slot));
+        cx.spawn_in(window, async move |this, cx| {
+            while let Ok(first) = events.recv_async().await {
+                let batch: Vec<Event> = std::iter::once(first).chain(events.try_iter()).collect();
+                let alive = this.update(cx, |this, cx| {
+                    for event in batch {
+                        if !this.engine_answered(&event, cx) {
+                            this.model.apply(event);
+                        }
+                    }
+                    cx.notify();
+                });
+                if alive.is_err() {
+                    break;
+                }
+            }
+        })
+        .detach();
+        self.session = Some(session);
+    }
+
+    /// Анализировать партию движком `choice`. Сессия продолжает текущую
+    /// позицию с новым движком; выбор запоминается, как только движок
+    /// ответит.
+    fn choose_engine(&mut self, choice: EngineChoice, window: &mut Window, cx: &mut Context<Self>) {
+        if choice == self.settings.engine && self.session.is_some() {
+            return;
+        }
+        let Some(options) = choice.options() else {
+            self.warn(format!("{} не найден", choice.title()), cx);
+            return;
+        };
+        if let EngineChoice::Custom(custom) = &choice {
+            self.settings.custom_engine = Some(custom.clone());
+        }
+        let previous = std::mem::replace(&mut self.settings.engine, choice);
+        // Вернуться — к тому, что работал до первой из смен подряд.
+        let fallback = self.engine_switch.take().map_or(previous, |switch| switch.fallback);
+        self.engine_switch = Some(Switch { fallback, announce: true });
+        self.model.engine_changing();
+        match &self.session {
+            Some(session) => session.send(Command::SetEngine(options)),
+            None => {
+                self.start_session(options, window, cx);
+                if self.paused {
+                    self.send(Command::Pause(true));
+                }
+            }
+        }
+        self.notice = None;
+        cx.notify();
+    }
+
+    /// Следующий движок по кругу — клавиша E: сравнить движки на одной
+    /// позиции, не открывая меню.
+    fn next_engine(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let choices: Vec<EngineChoice> = engine_choices(self.settings.custom_engine.as_deref())
+            .into_iter()
+            .filter_map(|(choice, status)| status.is_ok().then_some(choice))
+            .collect();
+        let next = match choices.iter().position(|choice| *choice == self.settings.engine) {
+            Some(at) => choices.get((at + 1) % choices.len()),
+            None => choices.first(),
+        };
+        match next {
+            Some(next) if *next != self.settings.engine || self.session.is_none() => {
+                self.choose_engine(next.clone(), window, cx);
+            }
+            _ => self.flash("Другого движка нет — выберите свой в меню движков", cx),
+        }
+    }
+
+    /// Свой UCI-движок: системный выбор файла.
+    fn pick_engine(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let picked = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: Some("Выбрать движок".into()),
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let path = match picked.await {
+                Ok(Ok(Some(paths))) => paths.into_iter().next(),
+                Ok(Err(error)) => {
+                    let _ = this.update(cx, |this, cx| {
+                        this.warn(format!("Не удалось открыть выбор файла: {error:#}"), cx);
+                    });
+                    None
+                }
+                Ok(Ok(None)) | Err(_) => None,
+            };
+            if let Some(path) = path {
+                let _ = this.update_in(cx, |this, window, cx| {
+                    this.choose_engine(EngineChoice::Custom(path), window, cx);
+                });
+            }
+        })
+        .detach();
+    }
+
+    /// Ответ движка после смены: запустился — выбор запоминается; не
+    /// запустился — анализ возвращается к прежнему движку. `true` — событие
+    /// обработано здесь и модели не нужно: сбой нового движка, от которого
+    /// уже вернулись к прежнему, — не сбой анализа.
+    fn engine_answered(&mut self, event: &Event, cx: &mut Context<Self>) -> bool {
+        let Some(switch) = &self.engine_switch else { return false };
+        match event {
+            Event::EngineReady { name, lines } => {
+                if switch.announce {
+                    self.settings.save();
+                    let note = if *lines < 2 {
+                        " — одна линия: без «!» и без стрелок других ходов"
+                    } else {
+                        ""
+                    };
+                    self.flash(format!("Анализирует {name}{note}"), cx);
+                }
+                self.engine_switch = None;
+                false
+            }
+            Event::EngineFailed { message, .. } => {
+                let fallback = switch.fallback.clone();
+                self.engine_switch = None;
+                let failed = std::mem::replace(&mut self.settings.engine, fallback);
+                match self.settings.engine.options().filter(|_| self.settings.engine != failed) {
+                    Some(options) => {
+                        // Не запустившийся движок больше не выбран — и при
+                        // следующем запуске тоже; в меню он остаётся.
+                        self.settings.save();
+                        self.model.engine_changing();
+                        self.send(Command::SetEngine(options));
+                        self.warn(
+                            format!(
+                                "{} не запустился: {message}. Анализирует {}",
+                                failed.title(),
+                                self.settings.engine.title()
+                            ),
+                            cx,
+                        );
+                        true
+                    }
+                    None => {
+                        self.warn(format!("{} не запустился: {message}", failed.title()), cx);
+                        self.settings.engine = failed;
+                        false
+                    }
+                }
+            }
+            _ => false,
         }
     }
 
@@ -932,6 +1107,11 @@ impl Workspace {
                 )
             })
             .when(!(live && compact), |this| {
+                // Движок выбирают до эфира или между партиями; в тесном
+                // заголовке над одной доской его меняют клавишей E.
+                this.child(self.engine_menu(p, cx))
+            })
+            .when(!(live && compact), |this| {
                 this.child(
                     tool(
                         "theme",
@@ -995,6 +1175,54 @@ impl Workspace {
             })
     }
 
+    /// Меню движков: те, что пришли с программой, свой (если его
+    /// выбирали) и выбор своего UCI-движка. У каждого — чем он хорош.
+    fn engine_menu(&self, p: &Palette, cx: &mut Context<Self>) -> impl IntoElement {
+        let this = cx.entity().downgrade();
+        let current = self.settings.engine.clone();
+        let custom = self.settings.custom_engine.clone();
+        Button::new("engine")
+            .ghost()
+            .small()
+            .icon(Icon::new(IconName::Cpu))
+            .tooltip(format!("Движок: {} (E)", current.title()))
+            .text_color(hex(p.muted))
+            .dropdown_menu_with_anchor(Anchor::TopRight, move |menu: PopupMenu, _, _| {
+                // Меню собирается, когда его открывают: есть ли движки на
+                // диске, проверяется тогда же, а не на каждой перерисовке.
+                let mut menu = menu.min_w(px(300.)).label("Движок анализа");
+                for (choice, status) in &engine_choices(custom.as_deref()) {
+                    let summary: SharedString = match (choice, status) {
+                        (_, Err(reason)) => (*reason).into(),
+                        (EngineChoice::Bundled(engine), Ok(())) => engine.summary().into(),
+                        (EngineChoice::Custom(path), Ok(())) => path.display().to_string().into(),
+                    };
+                    let found = status.is_ok();
+                    let title: SharedString = choice.title().into();
+                    let (this, choice) = (this.clone(), choice.clone());
+                    menu = menu.item(
+                        PopupMenuItem::element(move |_, cx| {
+                            engine_item(theme::palette(cx), title.clone(), summary.clone())
+                        })
+                        .checked(choice == current)
+                        .disabled(!found)
+                        .on_click(move |_, window, cx| {
+                            let _ =
+                                this.update(cx, |this, cx| this.choose_engine(choice.clone(), window, cx));
+                        }),
+                    );
+                }
+                let this = this.clone();
+                menu.separator().item(
+                    PopupMenuItem::new("Другой UCI-движок…").icon(IconName::FolderOpen).on_click(
+                        move |_, window, cx| {
+                            let _ = this.update(cx, |this, cx| this.pick_engine(window, cx));
+                        },
+                    ),
+                )
+            })
+    }
+
     /// Состояние: трансляция (сжимается первой — её название бывает очень
     /// длинным), распознавание доски (только на экране анализа) и движок.
     fn statuses(&self, p: &Palette, live: bool) -> Vec<AnyElement> {
@@ -1024,7 +1252,9 @@ impl Workspace {
             (Some(name), None) => {
                 status(p, if self.paused { p.caution } else { p.live }, name.clone().into(), None)
             }
-            (None, None) => status(p, p.faint, "Движок запускается".into(), None),
+            (None, None) => {
+                status(p, p.faint, format!("{} запускается", self.settings.engine.title()).into(), None)
+            }
         };
         let mut statuses = vec![capture.into_any_element()];
         if live {
@@ -1166,6 +1396,7 @@ impl Workspace {
                     .child(key_hint(p, "I", "только доска"))
                     .child(key_hint(p, "A", "стрелки на трансляции"))
                     .child(key_hint(p, "T", "поверх окон"))
+                    .child(key_hint(p, "E", "движок"))
                     .child(key_hint(p, "D", "тема")),
             )
     }
@@ -1513,6 +1744,38 @@ fn preview(
     .size_full()
 }
 
+/// Движки для меню и клавиши E: из поставки и свой, если его выбирали.
+/// `Err` — почему движок сейчас не выбрать.
+fn engine_choices(custom: Option<&std::path::Path>) -> Vec<(EngineChoice, Result<(), &'static str>)> {
+    Bundled::ALL
+        .map(EngineChoice::Bundled)
+        .into_iter()
+        .chain(custom.map(|path| EngineChoice::Custom(path.to_path_buf())))
+        .map(|choice| {
+            let status = match &choice {
+                EngineChoice::Bundled(engine) => match engine.unsupported() {
+                    Some(reason) => Err(reason),
+                    None => engine.locate().map(drop).ok_or("Нет рядом с программой"),
+                },
+                EngineChoice::Custom(_) => choice.locate().map(drop).ok_or("Файла больше нет"),
+            };
+            (choice, status)
+        })
+        .collect()
+}
+
+/// Строка меню движков: название и под ним — чем движок хорош (или где
+/// лежит свой).
+fn engine_item(p: Palette, title: SharedString, summary: SharedString) -> impl IntoElement {
+    div()
+        .py_1()
+        .flex()
+        .flex_col()
+        .min_w_0()
+        .child(div().text_sm().text_color(hex(p.text)).child(title))
+        .child(div().text_xs().text_color(hex(p.muted)).truncate().child(summary))
+}
+
 /// Кадр BGRA — в картинку GPUI: он и так хранит пиксели в BGRA.
 fn frame_image(frame: &Frame) -> RenderImage {
     let buffer = image::RgbaImage::from_raw(frame.width(), frame.height(), frame.bgra().to_vec())
@@ -1550,6 +1813,7 @@ impl Render for Workspace {
             .on_action(cx.listener(|this, _: &TogglePin, window, cx| this.toggle_pin(window, cx)))
             .on_action(cx.listener(|this, _: &ToggleTheme, window, cx| this.toggle_theme(window, cx)))
             .on_action(cx.listener(|this, _: &ToggleOverlay, window, cx| this.toggle_overlay(window, cx)))
+            .on_action(cx.listener(|this, _: &NextEngine, window, cx| this.next_engine(window, cx)))
             .on_action(cx.listener(|this, _: &ToggleDetails, window, cx| {
                 if matches!(this.phase, Phase::Live) {
                     this.toggle_details(window, cx);

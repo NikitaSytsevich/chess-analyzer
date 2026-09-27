@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 use analyzer_chess::{Chess, Position, Score, UciMove, Wdl};
 
 use crate::transport::{Factory, Transport};
-use crate::uci::{EngineLine, InfoLine, RawScore, parse_line};
+use crate::uci::{EngineLine, InfoLine, RawScore, UciOption, parse_line};
 use crate::{AnalysisRequest, AnalysisUpdate, EngineEvent, EngineOptions, Line, expected_lines};
 
 pub(crate) enum Command {
@@ -23,6 +23,13 @@ pub(crate) enum Command {
 const UPDATE_INTERVAL: Duration = Duration::from_millis(100);
 /// Загрузка сети NNUE (100+ МБ) на холодном диске — не мгновенная.
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(20);
+/// Не ответил движок `bestmove` на `stop` за это время — `stop` уходит ещё
+/// раз. Reckless теряет `stop`, пришедший сразу за `go`: его поиск начинается
+/// чуть позже и сбрасывает просьбу остановиться — и думал бы до предела
+/// времени, минуту, пока анализатор ждёт его, чтобы начать новую позицию.
+const STOP_RETRY: Duration = Duration::from_millis(100);
+/// Не ответил и за это — завис: движок перезапускается.
+const STOP_TIMEOUT: Duration = Duration::from_secs(2);
 
 pub(crate) fn run(
     factory: Factory,
@@ -35,6 +42,7 @@ pub(crate) fn run(
         options,
         events,
         transport: None,
+        lines: 1,
         search: None,
         queued: None,
         failures: 0,
@@ -48,6 +56,8 @@ struct Actor {
     options: EngineOptions,
     events: flume::Sender<EngineEvent>,
     transport: Option<Box<dyn Transport>>,
+    /// Сколько линий присылает запущенный движок: MultiPV есть не у всех.
+    lines: u8,
     search: Option<Search>,
     /// Позиция, которую начнём анализировать, как только движок освободится:
     /// после `bestmove` на наш `stop` или после перезапуска.
@@ -84,6 +94,9 @@ impl Actor {
                 Wake::Line(Ok(None) | Err(_)) => self.crashed("движок завершился"),
                 Wake::Timeout => self.flush(false),
             }
+            // Не только по таймауту: движок, который не услышал `stop`,
+            // продолжает сыпать строками, и таймаут не наступает.
+            self.repeat_stop();
         }
     }
 
@@ -94,10 +107,8 @@ impl Actor {
             .as_ref()
             .filter(|search| search.dirty)
             .map(|search| search.last_emit + UPDATE_INTERVAL);
-        match (reconnect, flush) {
-            (Some(a), Some(b)) => Some(a.min(b)),
-            (a, b) => a.or(b),
-        }
+        let stop = self.search.as_ref().and_then(|search| search.stop).map(|stop| stop.last + STOP_RETRY);
+        [reconnect, flush, stop].into_iter().flatten().min()
     }
 
     fn command(&mut self, command: Command) {
@@ -140,10 +151,34 @@ impl Actor {
         let Some(search) = &mut self.search else {
             return;
         };
-        if search.stopping {
+        if search.stopping() {
             return;
         }
-        search.stopping = true;
+        let now = Instant::now();
+        search.stop = Some(StopAsked { first: now, last: now });
+        self.send_stop();
+    }
+
+    /// Движок не ответил на `stop`: сказать ещё раз, а если молчит слишком
+    /// долго — перезапустить его.
+    fn repeat_stop(&mut self) {
+        let Some(stop) = self.search.as_mut().and_then(|search| search.stop.as_mut()) else {
+            return;
+        };
+        let now = Instant::now();
+        if now < stop.last + STOP_RETRY {
+            return;
+        }
+        if now >= stop.first + STOP_TIMEOUT {
+            self.crashed("движок не остановился");
+            return;
+        }
+        stop.last = now;
+        tracing::debug!("the engine did not stop, asking again");
+        self.send_stop();
+    }
+
+    fn send_stop(&mut self) {
         if let Err(error) = self.transport.as_mut().map_or(Ok(()), |t| t.send("stop")) {
             self.crashed(&error.to_string());
         }
@@ -171,7 +206,7 @@ impl Actor {
             transport.send(&position)?;
             transport.send(&go)
         })();
-        let expected = expected_lines(&request.position, self.options.multipv);
+        let expected = expected_lines(&request.position, self.lines);
         self.search = Some(Search::new(request, expected));
         if let Err(error) = result {
             self.crashed(&error.to_string());
@@ -184,7 +219,7 @@ impl Actor {
                 let Some(search) = &mut self.search else {
                     return;
                 };
-                if search.stopping {
+                if search.stopping() {
                     return;
                 }
                 search.absorb(info);
@@ -195,7 +230,7 @@ impl Actor {
             EngineLine::BestMove(_) => {
                 // Поиск кончился сам — по пределу глубины или времени, а не
                 // по нашему `stop`.
-                let finished = self.search.as_ref().filter(|search| !search.stopping);
+                let finished = self.search.as_ref().filter(|search| !search.stopping());
                 if let Some((id, depth)) = finished.map(|search| (search.request.id, search.depth)) {
                     self.flush(true);
                     let _ = self.events.send(EngineEvent::Finished { id, depth });
@@ -214,7 +249,7 @@ impl Actor {
         let Some(search) = &mut self.search else {
             return;
         };
-        if !search.dirty || search.stopping {
+        if !search.dirty || search.stopping() {
             return;
         }
         if !force && search.last_emit.elapsed() < UPDATE_INTERVAL {
@@ -222,22 +257,23 @@ impl Actor {
         }
         search.dirty = false;
         search.last_emit = Instant::now();
-        let update = search.update(self.options.multipv);
+        let update = search.update(self.lines);
         let _ = self.events.send(EngineEvent::Update(update));
     }
 
     fn connect(&mut self) {
         let result = (self.factory)(&self.options).and_then(|mut transport| {
-            let name = handshake(transport.as_mut(), &self.options)?;
-            Ok((transport, name))
+            let hello = handshake(transport.as_mut(), &self.options)?;
+            Ok((transport, hello))
         });
         match result {
-            Ok((transport, name)) => {
-                tracing::info!(%name, "engine ready");
+            Ok((transport, Hello { name, lines })) => {
+                tracing::info!(%name, lines, "engine ready");
                 self.transport = Some(transport);
+                self.lines = lines;
                 self.failures = 0;
                 self.reconnect_at = None;
-                let _ = self.events.send(EngineEvent::Ready { name });
+                let _ = self.events.send(EngineEvent::Ready { name, lines });
                 if let Some(request) = self.queued.take() {
                     self.start(request);
                 }
@@ -251,7 +287,7 @@ impl Actor {
         if let Some(search) = self.search.take() {
             // Упал посреди анализа — продолжим ту же позицию после
             // перезапуска, если за это время не попросили другую.
-            if !search.stopping {
+            if !search.stopping() {
                 self.queued.get_or_insert(search.request);
             }
         }
@@ -269,28 +305,60 @@ impl Actor {
     }
 }
 
-fn handshake(transport: &mut dyn Transport, options: &EngineOptions) -> io::Result<String> {
+/// Что движок рассказал о себе при запуске.
+struct Hello {
+    name: String,
+    /// Сколько линий он будет присылать.
+    lines: u8,
+}
+
+fn handshake(transport: &mut dyn Transport, options: &EngineOptions) -> io::Result<Hello> {
     transport.send("uci")?;
     let mut name = String::from("UCI-движок");
+    let mut declared = Vec::new();
     wait_for(transport, |line| match line {
         EngineLine::IdName(id) => {
             name = id;
             false
         }
+        EngineLine::Option(option) => {
+            declared.push(option);
+            false
+        }
         EngineLine::UciOk => true,
         _ => false,
     })?;
-    for (option, value) in [
-        ("Threads", options.threads.to_string()),
-        ("Hash", options.hash_mb.to_string()),
-        ("MultiPV", options.multipv.to_string()),
-        ("UCI_ShowWDL", "true".to_owned()),
-    ] {
-        transport.send(&format!("setoption name {option} value {value}"))?;
+    // Движку — только объявленные опции и в объявленных пределах: чужую
+    // опцию один движок молча пропустит, другой ответит ошибкой, а без
+    // MultiPV линия будет одна, сколько их ни проси.
+    let find = |wanted: &str| declared.iter().find(|option| option.name.eq_ignore_ascii_case(wanted));
+    for (wanted, value) in [("Threads", i64::from(options.threads)), ("Hash", i64::from(options.hash_mb))] {
+        if let Some(option) = find(wanted) {
+            set_option(transport, option, option.clamp(value))?;
+        }
+    }
+    let lines = match find("MultiPV") {
+        Some(option) => {
+            let lines = option.clamp(i64::from(options.multipv)).clamp(1, i64::from(u8::MAX));
+            set_option(transport, option, lines)?;
+            lines as u8
+        }
+        None => 1,
+    };
+    if let Some(option) = find("UCI_ShowWDL") {
+        set_option(transport, option, "true")?;
     }
     transport.send("isready")?;
     wait_for(transport, |line| line == EngineLine::ReadyOk)?;
-    Ok(name)
+    Ok(Hello { name, lines })
+}
+
+fn set_option(
+    transport: &mut dyn Transport,
+    option: &UciOption,
+    value: impl std::fmt::Display,
+) -> io::Result<()> {
+    transport.send(&format!("setoption name {} value {value}", option.name))
 }
 
 fn wait_for(transport: &mut dyn Transport, mut done: impl FnMut(EngineLine) -> bool) -> io::Result<()> {
@@ -312,12 +380,20 @@ fn wait_for(transport: &mut dyn Transport, mut done: impl FnMut(EngineLine) -> b
     }
 }
 
+/// Когда движку сказали `stop`: в первый раз и в последний.
+#[derive(Clone, Copy)]
+struct StopAsked {
+    first: Instant,
+    last: Instant,
+}
+
 /// Текущий поиск и то, что он уже прислал.
 struct Search {
     request: AnalysisRequest,
     expected_lines: u8,
     started: Instant,
-    stopping: bool,
+    /// Движку сказали `stop`, и он ещё не ответил `bestmove`.
+    stop: Option<StopAsked>,
     lines: BTreeMap<u8, Line>,
     depth: u32,
     seldepth: u32,
@@ -335,7 +411,7 @@ impl Search {
             request,
             expected_lines,
             started: now,
-            stopping: false,
+            stop: None,
             lines: BTreeMap::new(),
             depth: 0,
             seldepth: 0,
@@ -366,6 +442,10 @@ impl Search {
         self.hashfull = info.hashfull;
         self.lines.insert(info.multipv, Line { multipv: info.multipv, depth: info.depth, score, wdl, moves });
         self.dirty = true;
+    }
+
+    fn stopping(&self) -> bool {
+        self.stop.is_some()
     }
 
     /// Пришли все линии текущей глубины — можно показывать целиком.

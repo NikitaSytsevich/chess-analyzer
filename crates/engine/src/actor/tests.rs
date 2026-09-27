@@ -14,7 +14,20 @@ struct Script {
     depth_reached: u32,
     /// Сколько ближайших `go` закончатся падением процесса.
     crashes_left: u32,
+    /// Какие опции движок объявляет в ответ на `uci`; `None` — те же, что
+    /// Stockfish: Threads, Hash, MultiPV и UCI_ShowWDL.
+    options: Option<Vec<&'static str>>,
+    /// Сколько первых `stop` после каждого `go` движок не слышит — как
+    /// Reckless, у которого поиск сбрасывает `stop`, пришедший сразу за `go`.
+    deaf_stops: u32,
 }
+
+const STOCKFISH_OPTIONS: [&str; 4] = [
+    "option name Threads type spin default 1 min 1 max 1024",
+    "option name Hash type spin default 16 min 1 max 33554432",
+    "option name MultiPV type spin default 1 min 1 max 256",
+    "option name UCI_ShowWDL type check default false",
+];
 
 struct FakeTransport {
     to_engine: flume::Sender<String>,
@@ -55,16 +68,23 @@ fn fake_engine(
     };
     let mut multipv: i32 = 1;
     let mut searching = false;
+    let mut unheard = 0;
     while let Ok(command) = commands.recv() {
         log.lock().unwrap().push(command.clone());
         let words: Vec<&str> = command.split_whitespace().collect();
         match words.as_slice() {
             ["uci"] => {
                 say("id name Fake Engine 1".into());
+                let options = script.lock().unwrap().options.clone();
+                for option in options.unwrap_or_else(|| STOCKFISH_OPTIONS.to_vec()) {
+                    say(option.into());
+                }
                 say("uciok".into());
             }
             ["isready"] => say("readyok".into()),
-            ["setoption", "name", "MultiPV", "value", n] => multipv = n.parse().unwrap(),
+            ["setoption", "name", name, "value", n] if name.eq_ignore_ascii_case("MultiPV") => {
+                multipv = n.parse().unwrap();
+            }
             ["go", "depth", limit, ..] => {
                 let mut script = script.lock().unwrap();
                 if script.crashes_left > 0 {
@@ -73,6 +93,7 @@ fn fake_engine(
                     return;
                 }
                 let limit: u32 = limit.parse().unwrap();
+                unheard = script.deaf_stops;
                 for depth in 1..=limit.min(script.depth_reached) {
                     for k in 1..=multipv {
                         say(format!(
@@ -89,6 +110,7 @@ fn fake_engine(
                     searching = true;
                 }
             }
+            ["stop"] if searching && unheard > 0 => unheard -= 1,
             ["stop"] if searching => {
                 searching = false;
                 say("bestmove e2e4".into());
@@ -156,7 +178,7 @@ fn analysis_runs_to_the_depth_limit_with_every_line() {
         _ => None,
     });
     assert_eq!(depth, 5);
-    assert!(matches!(&seen[0], EngineEvent::Ready { name } if name == "Fake Engine 1"));
+    assert!(matches!(&seen[0], EngineEvent::Ready { name, lines: 3 } if name == "Fake Engine 1"));
     let last = seen
         .iter()
         .rev()
@@ -172,7 +194,53 @@ fn analysis_runs_to_the_depth_limit_with_every_line() {
     // Настройки ушли движку до первого поиска.
     let commands = h.commands();
     assert!(commands.contains(&"setoption name UCI_ShowWDL value true".to_owned()));
+    assert!(commands.contains(&"setoption name Hash value 256".to_owned()));
     assert!(commands.contains(&"go depth 5 movetime 60000".to_owned()));
+}
+
+#[test]
+fn an_engine_gets_only_the_options_it_declared() {
+    // Движок без MultiPV и WDL (как pawnocchio) и с маленьким хешем: ему не
+    // шлют чужих опций, Hash урезается до его предела, а линия одна — и
+    // глубина считается законченной по ней одной.
+    let options = vec![
+        "option name hash type spin default 16 min 1 max 128",
+        "option name Clear Hash type button",
+        "option name Move Overhead type spin default 10 min 1 max 10000",
+    ];
+    let h = harness(Script { depth_reached: 6, options: Some(options), ..Script::default() }, 6);
+    h.engine.analyze(request(1, &[]));
+    let (depth, seen) = h.wait_for(|event| match event {
+        EngineEvent::Finished { id: PositionId(1), depth } => Some(*depth),
+        _ => None,
+    });
+    assert_eq!(depth, 6);
+    assert!(matches!(&seen[0], EngineEvent::Ready { lines: 1, .. }), "{:?}", seen[0]);
+    let updates: Vec<_> = seen
+        .iter()
+        .filter_map(|event| match event {
+            EngineEvent::Update(update) => Some(update),
+            _ => None,
+        })
+        .collect();
+    assert!(updates.iter().all(|update| update.lines.len() == 1));
+    assert_eq!(updates.last().unwrap().depth, 6);
+    let settings: Vec<_> = h.commands().into_iter().filter(|c| c.starts_with("setoption")).collect();
+    // Имя — как его объявил движок, значение — в его пределах.
+    assert_eq!(settings, ["setoption name hash value 128"]);
+}
+
+#[test]
+fn multipv_is_limited_to_what_the_engine_allows() {
+    let options = vec!["option name MultiPV type spin default 1 min 1 max 2"];
+    let h = harness(Script { depth_reached: 4, options: Some(options), ..Script::default() }, 4);
+    h.engine.analyze(request(1, &[]));
+    let (update, seen) = h.wait_for(|event| match event {
+        EngineEvent::Update(update) if update.depth == 4 => Some(update.clone()),
+        _ => None,
+    });
+    assert!(matches!(&seen[0], EngineEvent::Ready { lines: 2, .. }), "{:?}", seen[0]);
+    assert_eq!(update.lines.iter().map(|line| line.multipv).collect::<Vec<_>>(), [1, 2]);
 }
 
 #[test]
@@ -214,7 +282,7 @@ fn a_new_position_waits_for_the_old_search_to_stop() {
 
 #[test]
 fn a_crashed_engine_comes_back_and_resumes_the_same_position() {
-    let h = harness(Script { depth_reached: 4, crashes_left: 1 }, 4);
+    let h = harness(Script { depth_reached: 4, crashes_left: 1, ..Script::default() }, 4);
     h.engine.analyze(request(3, &[]));
     let (retry, _) = h.wait_for(|event| match event {
         EngineEvent::Failed { retry_in, .. } => Some(*retry_in),
@@ -227,6 +295,40 @@ fn a_crashed_engine_comes_back_and_resumes_the_same_position() {
     });
     assert_eq!(depth, 4);
     assert!(seen.iter().any(|event| matches!(event, EngineEvent::Ready { .. })));
+}
+
+#[test]
+fn a_stop_the_engine_did_not_hear_is_repeated() {
+    // Вторая позиция приходит сразу за первой: `stop` уходит следом за
+    // `go`, и движок его теряет, как Reckless. Анализатор повторяет `stop`,
+    // а не ждёт минуту, пока движок додумает первую позицию.
+    let h = harness(Script { depth_reached: 3, deaf_stops: 2, ..Script::default() }, 40);
+    h.engine.analyze(request(1, &[]));
+    h.engine.analyze(request(2, &["e2e4"]));
+    let started = Instant::now();
+    h.wait_for(|event| {
+        matches!(event, EngineEvent::Update(update) if update.id == PositionId(2)).then_some(())
+    });
+    assert!(started.elapsed() < Duration::from_secs(1), "{:?}", started.elapsed());
+    let stops = h.commands().iter().filter(|command| *command == "stop").count();
+    assert_eq!(stops, 3, "{:?}", h.commands());
+}
+
+#[test]
+fn an_engine_that_never_stops_is_restarted() {
+    let h = harness(Script { depth_reached: 3, deaf_stops: u32::MAX, ..Script::default() }, 40);
+    h.engine.analyze(request(1, &[]));
+    h.wait_for(|event| matches!(event, EngineEvent::Update(_)).then_some(()));
+    h.engine.analyze(request(2, &["e2e4"]));
+    let (message, _) = h.wait_for(|event| match event {
+        EngineEvent::Failed { message, .. } => Some(message.clone()),
+        _ => None,
+    });
+    assert_eq!(message, "движок не остановился");
+    // После перезапуска анализируется та позиция, о которой просили.
+    h.wait_for(|event| {
+        matches!(event, EngineEvent::Update(update) if update.id == PositionId(2)).then_some(())
+    });
 }
 
 #[test]

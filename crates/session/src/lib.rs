@@ -61,6 +61,8 @@ pub enum Command {
     Reframe,
     /// Комментатор сам задал позицию.
     SetPosition(Chess),
+    /// Другой движок или другие настройки: движок перезапускается и
+    /// анализирует текущую позицию заново.
     SetEngine(EngineOptions),
     SetNotation(Notation),
     Shutdown,
@@ -81,8 +83,11 @@ pub enum Event {
         id: PositionId,
         depth: u32,
     },
+    /// Движок запущен. `lines` — сколько линий он присылает: у движка без
+    /// MultiPV — одна.
     EngineReady {
         name: String,
+        lines: u8,
     },
     EngineFailed {
         message: String,
@@ -155,6 +160,7 @@ fn run_core(
     let (engine_tx, engine_rx) = flume::unbounded();
     let engine = Engine::start(config.engine.clone(), engine_tx);
     let mut core = core::Core::new(config.notation, config.thresholds);
+    core.set_depth_lag(config.engine.depth_lag);
     loop {
         let wake = flume::Selector::new()
             .recv(commands, Wake::Command)
@@ -184,7 +190,11 @@ fn run_core(
                 Command::SetPosition(position) => {
                     let _ = vision_control.send(VisionControl::SetPosition(position));
                 }
-                Command::SetEngine(options) => engine.configure(options),
+                Command::SetEngine(options) => {
+                    let depth_lag = options.depth_lag;
+                    engine.configure(options);
+                    core.engine_changed(&engine, depth_lag);
+                }
                 Command::SetNotation(notation) => core.notation = notation,
                 Command::Shutdown => unreachable!("handled above"),
             },
@@ -199,7 +209,7 @@ fn run_core(
             Wake::Engine(Ok(event)) => match event {
                 EngineEvent::Update(update) => core.analysis(update, &mut out),
                 EngineEvent::Finished { id, depth } => out.push(Event::AnalysisFinished { id, depth }),
-                EngineEvent::Ready { name } => out.push(Event::EngineReady { name }),
+                EngineEvent::Ready { name, lines } => out.push(Event::EngineReady { name, lines }),
                 EngineEvent::Failed { message, retry_in } => {
                     out.push(Event::EngineFailed { message, retry_in })
                 }
