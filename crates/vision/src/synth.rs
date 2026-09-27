@@ -2,10 +2,12 @@
 //! оформлением. Нужны тестам распознавания и трекера — настоящие скриншоты
 //! дополняют их, но не заменяют: синтетика покрывает тысячи позиций.
 
+use std::cell::RefCell;
 use std::collections::HashMap;
+use std::rc::Rc;
 use std::time::Instant;
 
-use analyzer_chess::{Board, Square};
+use analyzer_chess::{Board, Piece, Square};
 
 use crate::Frame;
 use crate::pieces::{bundled_svg, render_svg};
@@ -60,8 +62,43 @@ impl Style {
     }
 }
 
+/// Фигура в полёте — ход, как его анимируют сайты: между клетками.
+#[derive(Clone, Copy, Debug)]
+pub struct Floating {
+    pub piece: Piece,
+    pub from: Square,
+    pub to: Square,
+    /// Сколько пути пройдено: 0 — фигура на `from`, 1 — на `to`.
+    pub progress: f32,
+    /// Непрозрачность: взятая фигура на Lichess тает, пока летит бьющая.
+    pub opacity: f32,
+}
+
 /// Рисует кадр: доска с полем, подсветка `highlighted`, фигуры из `board`.
 pub fn render(board: &Board, style: &Style, highlighted: &[Square]) -> Frame {
+    render_scene(board, style, highlighted, &[])
+}
+
+/// Картинка фигуры: набор, фигура и размер клетки.
+type Sprites = HashMap<(&'static str, Piece, u32), Rc<resvg::tiny_skia::Pixmap>>;
+
+/// Картинки фигур, растеризованные один раз на поток: SVG дорого
+/// растеризовать на каждый кадр, а тесты рисуют их тысячами.
+fn sprite(set: &'static str, piece: Piece, size: u32) -> Rc<resvg::tiny_skia::Pixmap> {
+    thread_local! {
+        static SPRITES: RefCell<Sprites> = RefCell::new(HashMap::new());
+    }
+    SPRITES.with(|sprites| {
+        Rc::clone(sprites.borrow_mut().entry((set, piece, size)).or_insert_with(|| {
+            let svg = bundled_svg(set, piece).expect("unknown bundled piece set");
+            Rc::new(render_svg(svg, size).expect("piece renders"))
+        }))
+    })
+}
+
+/// Кадр посреди хода: фигуры из `board` на своих клетках и ещё `floating`
+/// — между клетками.
+pub fn render_scene(board: &Board, style: &Style, highlighted: &[Square], floating: &[Floating]) -> Frame {
     let side = style.square * 8 + style.margin * 2;
     let mut canvas = vec![0f32; (side * side * 3) as usize];
     let mut fill = |x0: u32, y0: u32, x1: u32, y1: u32, color: [u8; 3], alpha: f32| {
@@ -77,7 +114,6 @@ pub fn render(board: &Board, style: &Style, highlighted: &[Square]) -> Frame {
     fill(0, 0, side, side, style.page, 1.0);
 
     let s = style.square;
-    let mut sprites = HashMap::new();
     let mut pieces = Vec::new();
     for row in 0..8u32 {
         for col in 0..8u32 {
@@ -105,23 +141,40 @@ pub fn render(board: &Board, style: &Style, highlighted: &[Square]) -> Frame {
             }
         }
     }
-    for (x, y, piece) in pieces {
-        let sprite = sprites.entry(piece).or_insert_with(|| {
-            let svg = bundled_svg(style.set, piece).expect("unknown bundled piece set");
-            render_svg(svg, s).expect("piece renders")
-        });
+    // Где на кадре клетка: левый верхний угол.
+    let corner = |square: Square| {
+        (0..64u32)
+            .map(|i| (i % 8, i / 8))
+            .find(|&(col, row)| style.orientation.square(col as usize, row as usize) == square)
+            .map(|(col, row)| ((style.margin + col * s) as f32, (style.margin + row * s) as f32))
+            .expect("every square is on the board")
+    };
+    let placed = pieces.into_iter().map(|(x, y, piece)| (x as f32, y as f32, piece, 1.0));
+    let flying = floating.iter().map(|floating| {
+        let (x0, y0) = corner(floating.from);
+        let (x1, y1) = corner(floating.to);
+        let t = floating.progress.clamp(0.0, 1.0);
+        (x0 + (x1 - x0) * t, y0 + (y1 - y0) * t, floating.piece, floating.opacity)
+    });
+    for (x, y, piece, opacity) in placed.chain(flying).collect::<Vec<_>>() {
+        let sprite = sprite(style.set, piece, s);
         let data = sprite.data();
+        let (x, y) = (x.round() as i64, y.round() as i64);
         for dy in 0..s {
             for dx in 0..s {
+                let (px, py) = (x + i64::from(dx), y + i64::from(dy));
+                if px < 0 || py < 0 || px >= i64::from(side) || py >= i64::from(side) {
+                    continue;
+                }
                 let src = ((dy * s + dx) * 4) as usize;
-                let alpha = f32::from(data[src + 3]) / 255.0;
+                let alpha = f32::from(data[src + 3]) / 255.0 * opacity;
                 if alpha == 0.0 {
                     continue;
                 }
-                let dst = (((y + dy) * side + x + dx) * 3) as usize;
+                let dst = ((py as u32 * side + px as u32) * 3) as usize;
                 for c in 0..3 {
                     // tiny-skia отдаёт цвет, уже умноженный на непрозрачность.
-                    canvas[dst + c] = f32::from(data[src + c]) + canvas[dst + c] * (1.0 - alpha);
+                    canvas[dst + c] = f32::from(data[src + c]) * opacity + canvas[dst + c] * (1.0 - alpha);
                 }
             }
         }

@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 
 use analyzer_chess::{Chess, Game, Position};
 use analyzer_tracker::{GameEvent, Tracker, TrackerConfig};
-use analyzer_vision::{FrameSlot, LEARNED_SET, Observation, Orientation, Recognizer, WindowRect};
+use analyzer_vision::{Frame, FrameSlot, LEARNED_SET, Observation, Orientation, Recognizer, WindowRect};
 
 /// Команды потоку зрения.
 pub(crate) enum VisionControl {
@@ -62,6 +62,25 @@ const STATUS_INTERVAL: Duration = Duration::from_millis(200);
 const FRAME_WAIT: Duration = Duration::from_millis(250);
 /// Столько кадров подряд без доски — и прежнее положение доски забывается.
 const LOST_FRAMES: u32 = 10;
+/// Нового кадра нет столько — значит, окно не менялось и доска та же, что на
+/// последнем кадре: трекеру показывают его снова. Windows, macOS и PipeWire
+/// присылают кадр, только когда окно изменилось, и последний кадр хода на
+/// неподвижной странице лайчесса или chess.com иначе оставался бы
+/// единственным: трекер, которому нужно два одинаковых кадра, ждал бы
+/// следующего изменения окна — тика часов, движения курсора, — а в пуле
+/// терял бы ходы. Пока окно меняется, кадры идут через 100 мс (захват — не
+/// больше десяти кадров в секунду), и пауза в полтора интервала не спутает
+/// с неподвижной доской кадр посреди анимации.
+const STILL_AFTER: Duration = Duration::from_millis(150);
+
+/// Последний кадр с доской — тот, что показывают трекеру снова, пока окно
+/// не меняется.
+struct Still {
+    frame: Frame,
+    observation: Arc<Observation>,
+    /// Когда трекер видел его последний раз.
+    shown: Instant,
+}
 
 pub(crate) fn run(
     slot: Arc<FrameSlot>,
@@ -79,6 +98,7 @@ pub(crate) fn run(
     // Windows и macOS присылают кадр, только когда окно изменилось, и доска,
     // сменившаяся неподвижной страницей, иначе так и считалась бы видной.
     let mut pending: Option<RecognitionStatus> = None;
+    let mut still: Option<Still> = None;
     loop {
         for command in control.try_iter() {
             match command {
@@ -87,6 +107,7 @@ pub(crate) fn run(
                     let flipped = recognizer.orientation().unwrap_or_default().flipped();
                     recognizer.set_orientation(flipped);
                     tracker.reset();
+                    still = None;
                     // Комментатор перевернул доску сам — трекер больше не
                     // спорит с ним, пока трансляция та же.
                     tracker.lock_orientation(true);
@@ -98,10 +119,12 @@ pub(crate) fn run(
                     recognizer.forget_orientation();
                     tracker.reset();
                     tracker.lock_orientation(false);
+                    still = None;
                 }
                 VisionControl::Reframe => {
                     misses = 0;
                     recognizer.forget_grid();
+                    still = None;
                 }
                 VisionControl::SetPosition(position) => {
                     let change = tracker.set_position(position);
@@ -111,12 +134,21 @@ pub(crate) fn run(
                 }
             }
         }
-        let wait = match pending {
+        let mut wait = match pending {
             Some(_) => STATUS_INTERVAL.saturating_sub(last_status.elapsed()),
             None => FRAME_WAIT,
         };
+        if let Some(still) = &still {
+            wait = wait.min(STILL_AFTER.saturating_sub(still.shown.elapsed()));
+        }
         let Some((seq, frame)) = slot.wait_newer(seen, wait) else {
-            if let Some(status) = pending.take() {
+            if let Some(still) = &mut still
+                && still.shown.elapsed() >= STILL_AFTER
+            {
+                still.shown = Instant::now();
+                track(&mut tracker, &mut recognizer, &still.frame, &still.observation, still.shown, &output);
+            }
+            if let Some(status) = pending.take_if(|_| last_status.elapsed() >= STATUS_INTERVAL) {
                 last_status = Instant::now();
                 let _ = output.send(VisionOutput::Status(status));
             }
@@ -144,36 +176,22 @@ pub(crate) fn run(
             let rect = frame.to_window(WindowRect { x: grid.x0, y: grid.y0, width: side, height: side })?;
             Some(BoardOnWindow { rect, window: frame.source()?.window })
         });
+        let observation = observation.map(Arc::new);
         if let Some(observation) = &observation {
-            let changes = tracker.observe(observation, frame.captured_at());
-            // Новую партию трекер мог начать с доски, прочитанной другой
-            // стороной, — следующие кадры распознаются уже так.
-            if let Some(orientation) = tracker.orientation()
-                && recognizer.orientation() != Some(orientation)
-            {
-                recognizer.set_orientation(orientation);
-            }
-            for change in changes {
-                // Позиция подтверждена правилами игры: выученный набор фигур
-                // доучивается на ней и становится точнее с каждым ходом.
-                if recognizer.active_set() == Some(LEARNED_SET)
-                    && matches!(change, GameEvent::Moved { .. } | GameEvent::Started { .. })
-                    && let Some(game) = tracker.game()
-                {
-                    let _ = recognizer.learn(&frame, game.current().board());
-                }
-                if let Some(game) = tracker.game() {
-                    let _ = output.send(VisionOutput::Game { game: Arc::new(game.clone()), change });
-                }
-            }
+            track(&mut tracker, &mut recognizer, &frame, observation, frame.captured_at(), &output);
         }
+        still = observation.as_ref().map(|observation| Still {
+            frame: frame.clone(),
+            observation: Arc::clone(observation),
+            shown: started,
+        });
         let status = RecognitionStatus {
             board_found: observation.is_some(),
             mean_confidence: observation.as_ref().map_or(0.0, |o| o.mean_confidence),
             set: recognizer.active_set().map(str::to_owned),
             orientation: recognizer.orientation(),
             frame_time: started.elapsed(),
-            observation: observation.map(Arc::new),
+            observation,
             board,
             window: frame.source().and_then(|source| source.window),
         };
@@ -187,17 +205,95 @@ pub(crate) fn run(
     }
 }
 
+/// Показывает трекеру доску с кадра `frame` и сообщает ядру, что произошло в
+/// партии.
+fn track(
+    tracker: &mut Tracker,
+    recognizer: &mut Recognizer,
+    frame: &Frame,
+    observation: &Observation,
+    now: Instant,
+    output: &flume::Sender<VisionOutput>,
+) {
+    let changes = tracker.observe(observation, now);
+    // Новую партию трекер мог начать с доски, прочитанной другой
+    // стороной, — следующие кадры распознаются уже так.
+    if let Some(orientation) = tracker.orientation()
+        && recognizer.orientation() != Some(orientation)
+    {
+        recognizer.set_orientation(orientation);
+    }
+    for change in changes {
+        // Позиция подтверждена правилами игры: выученный набор фигур
+        // доучивается на ней и становится точнее с каждым ходом.
+        if recognizer.active_set() == Some(LEARNED_SET)
+            && matches!(change, GameEvent::Moved { .. } | GameEvent::Started { .. })
+            && let Some(game) = tracker.game()
+        {
+            let _ = recognizer.learn(frame, game.current().board());
+        }
+        if let Some(game) = tracker.game() {
+            let _ = output.send(VisionOutput::Game { game: Arc::new(game.clone()), change });
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
     use std::time::{Duration, Instant};
 
-    use analyzer_chess::{Chess, Position as _};
-    use analyzer_tracker::TrackerConfig;
+    use analyzer_chess::{Chess, Position as _, Square, UciMove};
+    use analyzer_tracker::{GameEvent, TrackerConfig};
     use analyzer_vision::synth::{Style, render};
     use analyzer_vision::{Frame, FrameSlot};
 
     use super::{RecognitionStatus, VisionControl, VisionOutput, run};
+
+    /// Неподвижная страница лайчесса: окно меняется, только когда сделан ход,
+    /// и кадров приходит по одному — Windows, macOS и PipeWire не присылают
+    /// кадр, пока окно то же. Одного кадра трекеру мало, но новых нет — значит,
+    /// доска стоит, и партия всё равно начинается, а ход принимается.
+    #[test]
+    fn a_still_page_needs_one_frame_per_move() {
+        let slot = Arc::new(FrameSlot::new());
+        let (control, commands) = flume::unbounded();
+        let (output, changes) = flume::unbounded();
+        let vision = {
+            let slot = Arc::clone(&slot);
+            std::thread::spawn(move || run(slot, TrackerConfig::default(), commands, output))
+        };
+        let style = Style::lichess("cburnett");
+        let mut position = Chess::default();
+
+        slot.put(render(position.board(), &style, &[]));
+        // Первый кадр разбирается долго: распознаватель ищет доску и набор фигур.
+        let started = wait_for_change(&changes, Duration::from_secs(10), "the game starts");
+        assert!(matches!(started, GameEvent::Started { .. }), "{started:?}");
+
+        let e4: UciMove = "e2e4".parse().unwrap();
+        position.play_unchecked(e4.to_move(&position).unwrap());
+        slot.put(render(position.board(), &style, &[Square::E2, Square::E4]));
+        let moved = wait_for_change(&changes, Duration::from_secs(1), "e4 is accepted");
+        assert!(
+            matches!(&moved, GameEvent::Moved { ply: 1, san, .. } if san.to_string() == "e4"),
+            "{moved:?}"
+        );
+
+        control.send(VisionControl::Stop).unwrap();
+        vision.join().unwrap();
+    }
+
+    /// Ждёт событие партии. Паникует, если за `time` его нет.
+    fn wait_for_change(outputs: &flume::Receiver<VisionOutput>, time: Duration, what: &str) -> GameEvent {
+        let deadline = Instant::now() + time;
+        while let Ok(output) = outputs.recv_deadline(deadline) {
+            if let VisionOutput::Game { change, .. } = output {
+                return change;
+            }
+        }
+        panic!("{what}: no game event within {time:?}");
+    }
 
     /// Доска сменилась неподвижной страницей — кадр без доски пришёл сразу за
     /// кадром с доской, и новых кадров больше нет (окно не меняется). Статус
