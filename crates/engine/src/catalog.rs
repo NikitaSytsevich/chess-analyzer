@@ -5,6 +5,7 @@
 //! папку `engines` рядом с ней, — а любой другой комментатор выбирает сам.
 
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 /// Движок, который приходит вместе с программой.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -130,6 +131,33 @@ fn x86_64_v3() -> bool {
     }
 }
 
+/// Точность или скорость.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum Pace {
+    /// Три линии, а значки и подсказки — когда оценка устоялась: у Stockfish
+    /// значок хода ставится с глубины 14, окончательным он становится на 18.
+    #[default]
+    Accurate,
+    /// Для пули и блица: стрелки и значки успевают до следующего хода.
+    /// Сам движок тут не узкое место — Stockfish 19 доходит до глубины 10 за
+    /// 30–50 мс. Время уходит на три линии и на глубину, с которой анализу
+    /// верят. Поэтому линий две — на них держатся знаки `!`, `!!` и `□`, —
+    /// пороги глубины на четыре полухода ниже (значок с глубины 10, стрелки
+    /// на трансляции с 6), а обновления втрое чаще. Оценки на малой глубине
+    /// грубее: ход, который стоит глубокого расчёта, движок может оценить
+    /// не сразу.
+    Fast,
+}
+
+/// Быстрый режим: две линии вместо трёх — до глубины 14 Stockfish 19 с
+/// двумя линиями доходит за 0,22 с, с тремя — за 0,38 с (медиана по
+/// позициям Strategic Test Suite, два потока)…
+const FAST_LINES: u8 = 2;
+/// …пороги глубины на четыре полухода ниже…
+const FAST_DISCOUNT: u32 = 4;
+/// …и обновления каждые 30 мс, а не 100.
+const FAST_UPDATES: Duration = Duration::from_millis(30);
+
 /// Каким движком анализировать партию.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum EngineChoice {
@@ -153,14 +181,33 @@ impl EngineChoice {
         }
     }
 
-    /// Настройки для запуска движка — если он есть. Свой движок считается
-    /// по шкале Stockfish.
-    pub fn options(&self) -> Option<crate::EngineOptions> {
-        let depth_lag = match self {
+    /// Настройки для запуска движка в режиме `pace` — если движок есть.
+    pub fn options(&self, pace: Pace) -> Option<crate::EngineOptions> {
+        let path = self.locate()?;
+        let options = crate::EngineOptions {
+            depth_discount: self.depth_discount(pace),
+            ..crate::EngineOptions::new(path)
+        };
+        Some(match pace {
+            Pace::Accurate => options,
+            Pace::Fast => {
+                crate::EngineOptions { multipv: FAST_LINES, update_interval: FAST_UPDATES, ..options }
+            }
+        })
+    }
+
+    /// На сколько полуходов раньше обычного анализу этого движка верят в
+    /// режиме `pace` (см. [`crate::EngineOptions::depth_discount`]). Свой
+    /// движок считается по шкале Stockfish.
+    pub fn depth_discount(&self, pace: Pace) -> u32 {
+        let lag = match self {
             Self::Bundled(engine) => engine.depth_lag(),
             Self::Custom(_) => 0,
         };
-        self.locate().map(|path| crate::EngineOptions { depth_lag, ..crate::EngineOptions::new(path) })
+        lag + match pace {
+            Pace::Accurate => 0,
+            Pace::Fast => FAST_DISCOUNT,
+        }
     }
 
     /// Название для людей: у своего движка — имя файла без расширения.

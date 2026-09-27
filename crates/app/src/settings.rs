@@ -7,7 +7,7 @@
 
 use std::path::PathBuf;
 
-use analyzer_engine::EngineChoice;
+use analyzer_engine::{EngineChoice, Pace};
 
 const FILE: &str = "settings.txt";
 
@@ -18,6 +18,8 @@ pub struct Settings {
     /// Свой движок, который выбирали последним: меню предлагает вернуться к
     /// нему, даже когда анализирует другой.
     pub custom_engine: Option<PathBuf>,
+    /// Точный режим или быстрый — для пули и блица.
+    pub pace: Pace,
 }
 
 impl Settings {
@@ -61,6 +63,9 @@ impl Settings {
                         settings.custom_engine = Some(path);
                     }
                 }
+                "pace" => {
+                    settings.pace = if value.trim() == "fast" { Pace::Fast } else { Pace::Accurate };
+                }
                 _ => {}
             }
         }
@@ -71,7 +76,12 @@ impl Settings {
     }
 
     fn render(&self) -> String {
-        let mut text = format!("# Шахматный анализатор\nengine = {}\n", self.engine.to_setting());
+        let pace = match self.pace {
+            Pace::Accurate => "accurate",
+            Pace::Fast => "fast",
+        };
+        let mut text =
+            format!("# Шахматный анализатор\nengine = {}\npace = {pace}\n", self.engine.to_setting());
         if let Some(path) = &self.custom_engine {
             text.push_str(&format!("custom_engine = {}\n", path.display()));
         }
@@ -108,16 +118,22 @@ mod tests {
         let settings = Settings {
             engine: EngineChoice::Bundled(Bundled::Reckless),
             custom_engine: Some(custom.clone()),
+            pace: Pace::Fast,
         };
         assert_eq!(Settings::parse(&settings.render()), settings);
-        let settings = Settings { engine: EngineChoice::Custom(custom.clone()), custom_engine: Some(custom) };
+        let settings = Settings {
+            engine: EngineChoice::Custom(custom.clone()),
+            custom_engine: Some(custom),
+            pace: Pace::Accurate,
+        };
         assert_eq!(Settings::parse(&settings.render()), settings);
     }
 
     #[test]
     fn a_strange_file_falls_back_to_the_defaults() {
         assert_eq!(Settings::parse(""), Settings::default());
-        let settings = Settings::parse("engine = komodo\ncustom_engine = relative/path\ntheme = dark\n");
+        let settings =
+            Settings::parse("engine = komodo\ncustom_engine = relative/path\ntheme = dark\npace = warp\n");
         assert_eq!(settings, Settings::default());
         // Свой движок без отдельной строки — он же и последний выбранный.
         let path = std::env::temp_dir().join("lc0");

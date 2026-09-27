@@ -19,7 +19,7 @@ use analyzer_chess::{
     Bitboard, CastlingMode, Chess, Color, EnPassantMode, Fen, PgnMeta, PlyAnnotation, Position, Score,
     Square, Thresholds, to_pgn,
 };
-use analyzer_engine::{Bundled, EngineChoice, EngineOptions};
+use analyzer_engine::{Bundled, EngineChoice, EngineOptions, Pace};
 use analyzer_session::demo::Demo;
 use analyzer_session::{Command, Event, Session, SessionConfig};
 use analyzer_vision::{Frame, FrameSlot, Orientation, find_board};
@@ -57,7 +57,8 @@ actions!(
         TogglePin,
         ToggleTheme,
         ToggleOverlay,
-        NextEngine
+        NextEngine,
+        ToggleFast
     ]
 );
 
@@ -78,6 +79,7 @@ pub fn key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("d", ToggleTheme, Some("Workspace")),
         KeyBinding::new("a", ToggleOverlay, Some("Workspace")),
         KeyBinding::new("e", NextEngine, Some("Workspace")),
+        KeyBinding::new("b", ToggleFast, Some("Workspace")),
     ]
 }
 
@@ -225,7 +227,7 @@ impl Workspace {
         let chosen = settings.engine.clone();
         let found = std::iter::once(chosen.clone())
             .chain(Bundled::ALL.map(EngineChoice::Bundled))
-            .find_map(|choice| choice.options().map(|options| (choice, options)));
+            .find_map(|choice| choice.options(settings.pace).map(|options| (choice, options)));
         let notice: Option<SharedString> = match &found {
             None => Some(
                 "Движок не найден: положите Stockfish в папку engines рядом с программой, \
@@ -364,7 +366,7 @@ impl Workspace {
         if choice == self.settings.engine && self.session.is_some() {
             return;
         }
-        let Some(options) = choice.options() else {
+        let Some(options) = choice.options(self.settings.pace) else {
             self.warn(format!("{} не найден", choice.title()), cx);
             return;
         };
@@ -406,6 +408,27 @@ impl Workspace {
             }
             _ => self.flash("Другого движка нет — выберите свой в меню движков", cx),
         }
+    }
+
+    /// Быстрый режим для пули и блица или обратно точный (см. `Pace`). Движок
+    /// не перезапускается: меняются число линий и глубины, с которых
+    /// анализатор верит оценке.
+    fn toggle_fast(&mut self, cx: &mut Context<Self>) {
+        self.settings.pace = match self.settings.pace {
+            Pace::Accurate => Pace::Fast,
+            Pace::Fast => Pace::Accurate,
+        };
+        self.settings.save();
+        if let Some(options) = self.settings.engine.options(self.settings.pace) {
+            self.send(Command::SetEngine(options));
+        }
+        self.flash(
+            match self.settings.pace {
+                Pace::Fast => "Быстрый режим: стрелки и значки успевают до следующего хода",
+                Pace::Accurate => "Точный режим: три линии, значки — на устоявшейся оценке",
+            },
+            cx,
+        );
     }
 
     /// Свой UCI-движок: системный выбор файла.
@@ -460,7 +483,12 @@ impl Workspace {
                 let fallback = switch.fallback.clone();
                 self.engine_switch = None;
                 let failed = std::mem::replace(&mut self.settings.engine, fallback);
-                match self.settings.engine.options().filter(|_| self.settings.engine != failed) {
+                match self
+                    .settings
+                    .engine
+                    .options(self.settings.pace)
+                    .filter(|_| self.settings.engine != failed)
+                {
                     Some(options) => {
                         // Не запустившийся движок больше не выбран — и при
                         // следующем запуске тоже; в меню он остаётся.
@@ -924,7 +952,13 @@ impl Workspace {
             let game = self.model.game.as_ref()?;
             let arrows = match (&self.model.analysis, self.model.ending()) {
                 (Some(analysis), None) => {
-                    overlay::arrows(analysis, game.current().turn(), &Thresholds::default())
+                    let depth_discount = self.settings.engine.depth_discount(self.settings.pace);
+                    overlay::arrows(
+                        analysis,
+                        game.current().turn(),
+                        &Thresholds::default(),
+                        overlay::min_depth(depth_discount),
+                    )
                 }
                 _ => Vec::new(),
             };
@@ -1181,11 +1215,12 @@ impl Workspace {
         let this = cx.entity().downgrade();
         let current = self.settings.engine.clone();
         let custom = self.settings.custom_engine.clone();
+        let fast = self.settings.pace == Pace::Fast;
         Button::new("engine")
             .ghost()
             .small()
             .icon(Icon::new(IconName::Cpu))
-            .tooltip(format!("Движок: {} (E)", current.title()))
+            .tooltip(format!("Движок: {}{} (E)", current.title(), if fast { ", быстрый режим" } else { "" }))
             .text_color(hex(p.muted))
             .dropdown_menu_with_anchor(Anchor::TopRight, move |menu: PopupMenu, _, _| {
                 // Меню собирается, когда его открывают: есть ли движки на
@@ -1212,14 +1247,28 @@ impl Workspace {
                         }),
                     );
                 }
-                let this = this.clone();
-                menu.separator().item(
-                    PopupMenuItem::new("Другой UCI-движок…").icon(IconName::FolderOpen).on_click(
+                let pick = this.clone();
+                let toggle = this.clone();
+                menu.separator()
+                    .item(PopupMenuItem::new("Другой UCI-движок…").icon(IconName::FolderOpen).on_click(
                         move |_, window, cx| {
-                            let _ = this.update(cx, |this, cx| this.pick_engine(window, cx));
+                            let _ = pick.update(cx, |this, cx| this.pick_engine(window, cx));
                         },
-                    ),
-                )
+                    ))
+                    .separator()
+                    .item(
+                        PopupMenuItem::element(move |_, cx| {
+                            engine_item(
+                                theme::palette(cx),
+                                "Быстрый режим (B)".into(),
+                                "Пуля и блиц: стрелки и значки сразу, точность ниже".into(),
+                            )
+                        })
+                        .checked(fast)
+                        .on_click(move |_, _, cx| {
+                            let _ = toggle.update(cx, |this, cx| this.toggle_fast(cx));
+                        }),
+                    )
             })
     }
 
@@ -1247,13 +1296,14 @@ impl Workspace {
             Some(_) => status(p, p.failure, "Доска не видна".into(), None),
             None => status(p, p.faint, "Доска —".into(), None),
         };
+        let fast = (self.settings.pace == Pace::Fast).then(|| SharedString::from("быстро"));
         let engine = match (&self.model.engine_name, &self.model.engine_error) {
             (_, Some(_)) => status(p, p.failure, "Движок перезапускается".into(), None),
             (Some(name), None) => {
-                status(p, if self.paused { p.caution } else { p.live }, name.clone().into(), None)
+                status(p, if self.paused { p.caution } else { p.live }, name.clone().into(), fast)
             }
             (None, None) => {
-                status(p, p.faint, format!("{} запускается", self.settings.engine.title()).into(), None)
+                status(p, p.faint, format!("{} запускается", self.settings.engine.title()).into(), fast)
             }
         };
         let mut statuses = vec![capture.into_any_element()];
@@ -1397,6 +1447,7 @@ impl Workspace {
                     .child(key_hint(p, "A", "стрелки на трансляции"))
                     .child(key_hint(p, "T", "поверх окон"))
                     .child(key_hint(p, "E", "движок"))
+                    .child(key_hint(p, "B", "быстрый режим"))
                     .child(key_hint(p, "D", "тема")),
             )
     }
@@ -1814,6 +1865,7 @@ impl Render for Workspace {
             .on_action(cx.listener(|this, _: &ToggleTheme, window, cx| this.toggle_theme(window, cx)))
             .on_action(cx.listener(|this, _: &ToggleOverlay, window, cx| this.toggle_overlay(window, cx)))
             .on_action(cx.listener(|this, _: &NextEngine, window, cx| this.next_engine(window, cx)))
+            .on_action(cx.listener(|this, _: &ToggleFast, _, cx| this.toggle_fast(cx)))
             .on_action(cx.listener(|this, _: &ToggleDetails, window, cx| {
                 if matches!(this.phase, Phase::Live) {
                     this.toggle_details(window, cx);

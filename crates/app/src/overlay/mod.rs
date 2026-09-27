@@ -43,7 +43,7 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
 use self::place::{ScreenRect, TargetState};
-pub use self::scene::{Scene, arrows};
+pub use self::scene::{Scene, arrows, min_depth};
 pub use self::system::NO_WINDOW;
 use crate::theme::{self, hex};
 use crate::views::board::{badge_views, paint_arrows};

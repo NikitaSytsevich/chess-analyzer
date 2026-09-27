@@ -18,10 +18,11 @@ use analyzer_tracker::GameEvent;
 use crate::Event;
 use crate::hints::{HintKind, error_hint, mate_hint, mover_mates, only_move_hint, standout_hint};
 
-// Глубины ниже — для Stockfish. Другой движок может считать иначе: Reckless
-// режет перебор осторожнее и за то же время доходит на два полухода мельче,
-// а ход находит не хуже. Для него пороги сдвигаются (см. `Depths`), иначе
-// значки и подсказки ждали бы его в полтора-два раза дольше.
+// Глубины ниже — для Stockfish в точном режиме. Другой движок может считать
+// иначе: Reckless режет перебор осторожнее и за то же время доходит на два
+// полухода мельче, а ход находит не хуже. Для него пороги сдвигаются (см.
+// `Depths`), иначе значки и подсказки ждали бы его в полтора-два раза
+// дольше. Сдвигаются они и в быстром режиме — для пули и блица.
 
 /// Глубина, с которой оценке уже можно доверять для классификации хода…
 const ASSESS_DEPTH: u32 = 10;
@@ -44,8 +45,8 @@ const HINT_DEPTH: u32 = 16;
 /// только позиции текущей партии: комментатор может вести трансляцию часами.
 const KNOWN_LIMIT: usize = 4096;
 
-/// Пороги глубины для движка, который за то же время считает на `lag`
-/// полуходов мельче Stockfish (см. `analyzer_engine::Bundled::depth_lag`).
+/// Пороги глубины, сдвинутые на `discount` полуходов раньше (см.
+/// `analyzer_engine::EngineOptions::depth_discount`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Depths {
     assess: u32,
@@ -55,13 +56,15 @@ pub(crate) struct Depths {
 }
 
 impl Depths {
-    pub(crate) fn new(lag: u32) -> Self {
-        let shifted = |depth: u32| depth.saturating_sub(lag).max(1);
+    pub(crate) fn new(discount: u32) -> Self {
+        // Мельче этого не верим ни в каком режиме: на первых итерациях
+        // движок не видит и простой тактики.
+        let shifted = |depth: u32, floor: u32| depth.saturating_sub(discount).max(floor);
         Self {
-            assess: shifted(ASSESS_DEPTH),
-            settled: shifted(SETTLED_DEPTH),
-            final_: shifted(FINAL_DEPTH),
-            hint: shifted(HINT_DEPTH),
+            assess: shifted(ASSESS_DEPTH, 6),
+            settled: shifted(SETTLED_DEPTH, 8),
+            final_: shifted(FINAL_DEPTH, 10),
+            hint: shifted(HINT_DEPTH, 8),
         }
     }
 }
@@ -180,24 +183,25 @@ impl Core {
         engine.analyze(AnalysisRequest::from_game(id, game.as_ref(), new_game));
     }
 
-    /// Движок сменился. Оценки прежнего — в его шкале и с его глубинами:
-    /// смешай их с оценками нового, и ход получил бы класс за разницу
-    /// движков, а не за ошибку игрока. Поэтому прежние оценки забываются, а
-    /// текущая позиция анализируется заново; уже поставленные классы ходов
-    /// остаются.
+    /// Движок или режим сменился; текущая позиция анализируется заново.
+    /// `depth_discount` — на сколько полуходов раньше теперь верить анализу.
     ///
-    /// `depth_lag` — на сколько полуходов новый движок за то же время
-    /// считает мельче Stockfish.
-    pub(crate) fn engine_changed(&mut self, engine: &Engine, depth_lag: u32) {
-        self.depths = Depths::new(depth_lag);
-        self.known.clear();
+    /// Если сменился сам движок (`other_engine`), прежние оценки забываются:
+    /// они в шкале прежнего движка и с его глубинами — смешай их с оценками
+    /// нового, и ход получил бы класс за разницу движков, а не за ошибку
+    /// игрока. Уже поставленные классы ходов остаются.
+    pub(crate) fn engine_changed(&mut self, engine: &Engine, depth_discount: u32, other_engine: bool) {
+        self.depths = Depths::new(depth_discount);
+        if other_engine {
+            self.known.clear();
+        }
         self.current = None;
         self.analyze(engine, false);
     }
 
-    /// Пороги глубины для движка, с которым сессия запускается.
-    pub(crate) fn set_depth_lag(&mut self, depth_lag: u32) {
-        self.depths = Depths::new(depth_lag);
+    /// Пороги глубины для движка и режима, с которыми сессия запускается.
+    pub(crate) fn set_depth_discount(&mut self, depth_discount: u32) {
+        self.depths = Depths::new(depth_discount);
     }
 
     /// Обновление анализа: только для позиции, которая сейчас на доске.
@@ -506,7 +510,7 @@ mod tests {
         let (game, _) = play(&mut core, &engine, &game, "e2e4");
         analysed(&mut core, &game, 30, Score::Cp(30), "e7e5");
         let (before, _) = core.current.unwrap();
-        core.engine_changed(&engine, 0);
+        core.engine_changed(&engine, 0, true);
         let (after, _) = core.current.expect("the position is analysed again");
         assert_ne!(before, after, "a new request, not the old engine's one");
         // Новый движок на глубине 12 — уже лучшее, что известно о позиции:
@@ -522,7 +526,7 @@ mod tests {
         // класс хода устаивается у него на глубине 12, а не 14.
         let engine = engine();
         let mut core = Core::new(Notation::Russian, Thresholds::default());
-        core.set_depth_lag(2);
+        core.set_depth_discount(2);
         let game = start(&mut core, &engine, Chess::default());
         analysed(&mut core, &game, 16, Score::Cp(30), "e2e4");
         let (game, _) = play(&mut core, &engine, &game, "e2e4");
@@ -553,6 +557,22 @@ mod tests {
         assert!(shown(&out), "depth 12 is settled for an engine two plies shallower");
         assert_eq!(Depths::new(2), Depths { assess: 8, settled: 12, final_: 16, hint: 14 });
         assert_eq!(Depths::new(0).settled, SETTLED_DEPTH);
+        // Быстрый режим — ещё на четыре полухода раньше, но не мельче пола.
+        assert_eq!(Depths::new(4), Depths { assess: 6, settled: 10, final_: 14, hint: 12 });
+        assert_eq!(Depths::new(6), Depths { assess: 6, settled: 8, final_: 12, hint: 10 });
+    }
+
+    #[test]
+    fn a_faster_pace_keeps_what_the_engine_already_knows() {
+        let engine = engine();
+        let mut core = Core::new(Notation::Russian, Thresholds::default());
+        let game = start(&mut core, &engine, Chess::default());
+        analysed(&mut core, &game, 24, Score::Cp(30), "e2e4");
+        // Тот же движок в быстром режиме: оценки прежние, пороги ниже.
+        core.engine_changed(&engine, 4, false);
+        assert_eq!(core.known[&position_hash(game.current())].depth, 24);
+        assert_eq!(core.depths.settled, 10);
+        assert!(core.current.is_some(), "the position is analysed again");
     }
 
     #[test]

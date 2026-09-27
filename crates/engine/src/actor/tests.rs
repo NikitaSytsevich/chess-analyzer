@@ -333,6 +333,29 @@ fn an_engine_that_never_stops_is_restarted() {
 }
 
 #[test]
+fn the_number_of_lines_changes_without_a_restart() {
+    // Быстрый режим: две линии вместо трёх — между поисками, без перезапуска
+    // движка (Stockfish 19 запускается секунду-две).
+    let h = harness(Script { depth_reached: 3, ..Script::default() }, 40);
+    h.engine.analyze(request(1, &[]));
+    h.wait_for(|event| matches!(event, EngineEvent::Update(update) if update.lines.len() == 3).then_some(()));
+    h.engine.configure(EngineOptions { multipv: 2, max_depth: 40, ..EngineOptions::new("fake") });
+    let (update, seen) = h.wait_for(|event| match event {
+        EngineEvent::Update(update) if update.depth == 3 && update.lines.len() == 2 => Some(update.clone()),
+        _ => None,
+    });
+    // Та же позиция, заново и уже с двумя линиями.
+    assert_eq!(update.id, PositionId(1));
+    assert!(!seen.iter().any(|event| matches!(event, EngineEvent::Ready { .. })), "{seen:?}");
+    let commands = h.commands();
+    assert_eq!(commands.iter().filter(|command| *command == "uci").count(), 1, "{commands:?}");
+    let stop = commands.iter().position(|command| command == "stop").unwrap();
+    let lines = commands.iter().position(|command| command == "setoption name MultiPV value 2").unwrap();
+    let go = commands.iter().rposition(|command| command.starts_with("go")).unwrap();
+    assert!(stop < lines && lines < go, "{commands:?}");
+}
+
+#[test]
 fn stopping_is_a_pause_not_a_finish() {
     let h = harness(Script { depth_reached: 3, ..Script::default() }, 40);
     h.engine.analyze(request(1, &[]));

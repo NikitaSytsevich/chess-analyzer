@@ -18,9 +18,6 @@ pub(crate) enum Command {
     Quit,
 }
 
-/// Обновления интерфейсу — не чаще десяти в секунду. Первые глубины движок
-/// проходит за миллисекунды, и без этого предела шкала оценки мерцала бы.
-const UPDATE_INTERVAL: Duration = Duration::from_millis(100);
 /// Загрузка сети NNUE (100+ МБ) на холодном диске — не мгновенная.
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(20);
 /// Не ответил движок `bestmove` на `stop` за это время — `stop` уходит ещё
@@ -43,6 +40,8 @@ pub(crate) fn run(
         events,
         transport: None,
         lines: 1,
+        multipv: None,
+        lines_changed: false,
         search: None,
         queued: None,
         failures: 0,
@@ -58,6 +57,11 @@ struct Actor {
     transport: Option<Box<dyn Transport>>,
     /// Сколько линий присылает запущенный движок: MultiPV есть не у всех.
     lines: u8,
+    /// Опция MultiPV, как её объявил запущенный движок.
+    multipv: Option<UciOption>,
+    /// Число линий в настройках сменилось: движку его скажут перед
+    /// следующим поиском.
+    lines_changed: bool,
     search: Option<Search>,
     /// Позиция, которую начнём анализировать, как только движок освободится:
     /// после `bestmove` на наш `stop` или после перезапуска.
@@ -106,7 +110,7 @@ impl Actor {
             .search
             .as_ref()
             .filter(|search| search.dirty)
-            .map(|search| search.last_emit + UPDATE_INTERVAL);
+            .map(|search| search.last_emit + self.options.update_interval);
         let stop = self.search.as_ref().and_then(|search| search.stop).map(|stop| stop.last + STOP_RETRY);
         [reconnect, flush, stop].into_iter().flatten().min()
     }
@@ -119,16 +123,31 @@ impl Actor {
                 self.stop_search();
             }
             Command::Configure(options) => {
-                // Проще и надёжнее перезапустить движок, чем менять опции на
-                // ходу: часть из них (Hash, Threads) применяется только между
-                // поисками. Текущая позиция продолжится после перезапуска.
+                let process =
+                    |options: &EngineOptions| (options.path.clone(), options.threads, options.hash_mb);
+                let restart = process(&options) != process(&self.options);
+                let lines_changed = options.multipv != self.options.multipv;
                 self.options = options;
-                if let Some(search) = self.search.take() {
-                    self.queued.get_or_insert(search.request);
+                if restart {
+                    // Другой движок — другой процесс. А Hash и Threads проще и
+                    // надёжнее задать новому процессу, чем менять на ходу.
+                    // Текущая позиция продолжится после перезапуска.
+                    if let Some(search) = self.search.take() {
+                        self.queued.get_or_insert(search.request);
+                    }
+                    self.transport = None;
+                    self.failures = 0;
+                    self.reconnect_at = Some(Instant::now());
+                } else if lines_changed {
+                    // Число линий меняется между поисками, без перезапуска:
+                    // Stockfish 19 запускается секунду-две, и анализ на это
+                    // время замер бы. Текущая позиция — заново, с новым числом.
+                    self.lines_changed = true;
+                    if let Some(search) = self.search.as_ref().filter(|search| !search.stopping()) {
+                        self.queued.get_or_insert_with(|| search.request.clone());
+                    }
+                    self.stop_search();
                 }
-                self.transport = None;
-                self.failures = 0;
-                self.reconnect_at = Some(Instant::now());
             }
             Command::Quit => {}
         }
@@ -199,15 +218,23 @@ impl Actor {
         }
         let go =
             format!("go depth {} movetime {}", self.options.max_depth, self.options.max_time.as_millis());
+        let lines = match (std::mem::take(&mut self.lines_changed), &self.multipv) {
+            (true, Some(option)) => Some(multipv(option, self.options.multipv)),
+            _ => None,
+        };
         let result = (|| -> io::Result<()> {
+            if let (Some(lines), Some(option)) = (lines, &self.multipv) {
+                set_option(transport.as_mut(), option, lines)?;
+            }
             if request.new_game {
                 transport.send("ucinewgame")?;
             }
             transport.send(&position)?;
             transport.send(&go)
         })();
+        self.lines = lines.unwrap_or(self.lines);
         let expected = expected_lines(&request.position, self.lines);
-        self.search = Some(Search::new(request, expected));
+        self.search = Some(Search::new(request, expected, self.options.update_interval));
         if let Err(error) = result {
             self.crashed(&error.to_string());
         }
@@ -252,7 +279,7 @@ impl Actor {
         if !search.dirty || search.stopping() {
             return;
         }
-        if !force && search.last_emit.elapsed() < UPDATE_INTERVAL {
+        if !force && search.last_emit.elapsed() < self.options.update_interval {
             return;
         }
         search.dirty = false;
@@ -267,10 +294,12 @@ impl Actor {
             Ok((transport, hello))
         });
         match result {
-            Ok((transport, Hello { name, lines })) => {
+            Ok((transport, Hello { name, lines, multipv })) => {
                 tracing::info!(%name, lines, "engine ready");
                 self.transport = Some(transport);
                 self.lines = lines;
+                self.multipv = multipv;
+                self.lines_changed = false;
                 self.failures = 0;
                 self.reconnect_at = None;
                 let _ = self.events.send(EngineEvent::Ready { name, lines });
@@ -310,6 +339,8 @@ struct Hello {
     name: String,
     /// Сколько линий он будет присылать.
     lines: u8,
+    /// Его опция MultiPV, если она есть: по ней число линий меняется потом.
+    multipv: Option<UciOption>,
 }
 
 fn handshake(transport: &mut dyn Transport, options: &EngineOptions) -> io::Result<Hello> {
@@ -337,11 +368,12 @@ fn handshake(transport: &mut dyn Transport, options: &EngineOptions) -> io::Resu
             set_option(transport, option, option.clamp(value))?;
         }
     }
-    let lines = match find("MultiPV") {
+    let multipv_option = find("MultiPV").cloned();
+    let lines = match &multipv_option {
         Some(option) => {
-            let lines = option.clamp(i64::from(options.multipv)).clamp(1, i64::from(u8::MAX));
+            let lines = multipv(option, options.multipv);
             set_option(transport, option, lines)?;
-            lines as u8
+            lines
         }
         None => 1,
     };
@@ -350,7 +382,12 @@ fn handshake(transport: &mut dyn Transport, options: &EngineOptions) -> io::Resu
     }
     transport.send("isready")?;
     wait_for(transport, |line| line == EngineLine::ReadyOk)?;
-    Ok(Hello { name, lines })
+    Ok(Hello { name, lines, multipv: multipv_option })
+}
+
+/// Сколько линий просить у движка: сколько хотим, но в пределах его MultiPV.
+fn multipv(option: &UciOption, wanted: u8) -> u8 {
+    option.clamp(i64::from(wanted)).clamp(1, i64::from(u8::MAX)) as u8
 }
 
 fn set_option(
@@ -405,7 +442,7 @@ struct Search {
 }
 
 impl Search {
-    fn new(request: AnalysisRequest, expected_lines: u8) -> Self {
+    fn new(request: AnalysisRequest, expected_lines: u8, update_interval: Duration) -> Self {
         let now = Instant::now();
         Self {
             request,
@@ -420,7 +457,7 @@ impl Search {
             hashfull: 0,
             dirty: false,
             // «Давно» — чтобы первое обновление ушло сразу, без ожидания.
-            last_emit: now.checked_sub(UPDATE_INTERVAL).unwrap_or(now),
+            last_emit: now.checked_sub(update_interval).unwrap_or(now),
         }
     }
 

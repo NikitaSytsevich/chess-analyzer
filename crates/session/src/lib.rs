@@ -61,8 +61,8 @@ pub enum Command {
     Reframe,
     /// Комментатор сам задал позицию.
     SetPosition(Chess),
-    /// Другой движок или другие настройки: движок перезапускается и
-    /// анализирует текущую позицию заново.
+    /// Другой движок или другой режим (точный или быстрый): текущая позиция
+    /// анализируется заново. Сменился движок — забываются и его оценки.
     SetEngine(EngineOptions),
     SetNotation(Notation),
     Shutdown,
@@ -158,9 +158,10 @@ fn run_core(
     events: &flume::Sender<Event>,
 ) {
     let (engine_tx, engine_rx) = flume::unbounded();
+    let mut engine_path = config.engine.path.clone();
     let engine = Engine::start(config.engine.clone(), engine_tx);
     let mut core = core::Core::new(config.notation, config.thresholds);
-    core.set_depth_lag(config.engine.depth_lag);
+    core.set_depth_discount(config.engine.depth_discount);
     loop {
         let wake = flume::Selector::new()
             .recv(commands, Wake::Command)
@@ -191,9 +192,11 @@ fn run_core(
                     let _ = vision_control.send(VisionControl::SetPosition(position));
                 }
                 Command::SetEngine(options) => {
-                    let depth_lag = options.depth_lag;
+                    let other_engine = options.path != engine_path;
+                    let depth_discount = options.depth_discount;
+                    engine_path = options.path.clone();
                     engine.configure(options);
-                    core.engine_changed(&engine, depth_lag);
+                    core.engine_changed(&engine, depth_discount, other_engine);
                 }
                 Command::SetNotation(notation) => core.notation = notation,
                 Command::Shutdown => unreachable!("handled above"),

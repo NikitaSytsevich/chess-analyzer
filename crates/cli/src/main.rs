@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use analyzer_chess::{Notation, Position, line_text, move_prefix};
-use analyzer_engine::EngineChoice;
+use analyzer_engine::{EngineChoice, Pace};
 use analyzer_session::demo::{Demo, OPERA};
 use analyzer_session::{Event, GameEvent, Session, SessionConfig};
 use analyzer_vision::FrameSlot;
@@ -29,16 +29,24 @@ fn main() -> Result<()> {
         }
         None => EngineChoice::default(),
     };
+    let pace = match args.iter().position(|arg| arg == "--fast") {
+        Some(at) => {
+            args.remove(at);
+            Pace::Fast
+        }
+        None => Pace::Accurate,
+    };
     match args.first().map(String::as_str) {
         Some("demo") => {
             let seconds = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(2.0);
-            demo(&engine, Duration::from_secs_f64(seconds))
+            demo(&engine, pace, Duration::from_secs_f64(seconds))
         }
         _ => {
             eprintln!(
-                "использование: chess-analyzer-cli demo [секунд на ход] [--engine <движок>]\n\n\
+                "использование: chess-analyzer-cli demo [секунд на ход] [--engine <движок>] [--fast]\n\n\
                  demo      «Оперная партия» кадр за кадром через распознавание, трекер и движок\n\
-                 --engine  stockfish (по умолчанию), reckless или путь к любому UCI-движку"
+                 --engine  stockfish (по умолчанию), reckless или путь к любому UCI-движку\n\
+                 --fast    быстрый режим, как для пули и блица: две линии, значки раньше"
             );
             bail!("не указана команда")
         }
@@ -54,8 +62,8 @@ fn engine_choice(value: &str) -> Result<EngineChoice> {
 }
 
 /// Партия на синтетических кадрах: 10 кадров в секунду, как у захвата.
-fn demo(engine: &EngineChoice, per_move: Duration) -> Result<()> {
-    let options = engine.options().with_context(|| {
+fn demo(engine: &EngineChoice, pace: Pace, per_move: Duration) -> Result<()> {
+    let options = engine.options(pace).with_context(|| {
         format!("{} не найден: выполните `cargo xtask fetch-engines` или укажите путь", engine.title())
     })?;
     let slot = Arc::new(FrameSlot::new());
