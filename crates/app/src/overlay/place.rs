@@ -69,7 +69,9 @@ pub fn board_on_screen(window: ScreenRect, board: &BoardOnWindow) -> Option<Scre
 
 /// Границы окна, которые снял захват: видимые `visible` или вместе с
 /// невидимой рамкой `whole` (Windows), — те, что по размеру ближе к окну на
-/// кадре `captured`. Поровну или размер кадра неизвестен — видимые.
+/// кадре `captured`. Поровну или размер кадра неизвестен — видимые. Нужно
+/// только Windows: на macOS и X11 у окна одни границы.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 pub fn closest(visible: ScreenRect, whole: Option<ScreenRect>, captured: Option<(f32, f32)>) -> ScreenRect {
     let (Some(whole), Some((width, height))) = (whole, captured) else { return visible };
     let off =
