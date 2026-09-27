@@ -1,6 +1,6 @@
 [package]
 name = "analyzer-engine"
-description = "UCI-клиент Stockfish: анализ позиций в отдельном потоке"
+description = "UCI-клиент: Stockfish, Reckless или любой UCI-движок, анализ позиций в отдельном потоке"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

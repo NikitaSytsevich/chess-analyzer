@@ -1,14 +1,14 @@
 //! `chess-analyzer-cli` — весь конвейер анализа без окна.
 //!
 //! `demo` рисует «Оперную партию» кадр за кадром и прогоняет её через
-//! распознавание, трекер и настоящий Stockfish — проверка всей цепочки
-//! одной командой. В терминал печатаются ходы, оценки и подсказки.
+//! распознавание, трекер и настоящий движок — проверка всей цепочки одной
+//! командой. В терминал печатаются ходы, оценки и подсказки.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use analyzer_chess::{Notation, Position, line_text, move_prefix};
-use analyzer_engine::{EngineOptions, locate_stockfish};
+use analyzer_engine::{EngineChoice, Pace};
 use analyzer_session::demo::{Demo, OPERA};
 use analyzer_session::{Event, GameEvent, Session, SessionConfig};
 use analyzer_vision::FrameSlot;
@@ -20,29 +20,54 @@ fn main() -> Result<()> {
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "warn".into()),
         )
         .init();
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    let mut args: Vec<String> = std::env::args().skip(1).collect();
+    let engine = match args.iter().position(|arg| arg == "--engine") {
+        Some(at) => {
+            let value = args.get(at + 1).context("после --engine нужен движок")?.clone();
+            args.drain(at..at + 2);
+            engine_choice(&value)?
+        }
+        None => EngineChoice::default(),
+    };
+    let pace = match args.iter().position(|arg| arg == "--fast") {
+        Some(at) => {
+            args.remove(at);
+            Pace::Fast
+        }
+        None => Pace::Accurate,
+    };
     match args.first().map(String::as_str) {
         Some("demo") => {
             let seconds = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(2.0);
-            demo(Duration::from_secs_f64(seconds))
+            demo(&engine, pace, Duration::from_secs_f64(seconds))
         }
         _ => {
             eprintln!(
-                "использование: chess-analyzer-cli demo [секунд на ход]\n\n\
-                 demo  «Оперная партия» кадр за кадром через распознавание, трекер и Stockfish"
+                "использование: chess-analyzer-cli demo [секунд на ход] [--engine <движок>] [--fast]\n\n\
+                 demo      «Оперная партия» кадр за кадром через распознавание, трекер и движок\n\
+                 --engine  stockfish (по умолчанию), reckless или путь к любому UCI-движку\n\
+                 --fast    быстрый режим, как для пули и блица: две линии, значки раньше"
             );
             bail!("не указана команда")
         }
     }
 }
 
+/// Движок из поставки по имени или свой — по пути к файлу.
+fn engine_choice(value: &str) -> Result<EngineChoice> {
+    let absolute = std::path::absolute(value).context("не удалось понять путь к движку")?;
+    EngineChoice::from_setting(value)
+        .or_else(|| EngineChoice::from_setting(&absolute.to_string_lossy()))
+        .context("движок — stockfish, reckless или путь к исполняемому файлу")
+}
+
 /// Партия на синтетических кадрах: 10 кадров в секунду, как у захвата.
-fn demo(per_move: Duration) -> Result<()> {
-    let stockfish =
-        locate_stockfish().context("Stockfish не найден: выполните `cargo xtask fetch-stockfish`")?;
+fn demo(engine: &EngineChoice, pace: Pace, per_move: Duration) -> Result<()> {
+    let options = engine.options(pace).with_context(|| {
+        format!("{} не найден: выполните `cargo xtask fetch-engines` или укажите путь", engine.title())
+    })?;
     let slot = Arc::new(FrameSlot::new());
-    let (session, events) =
-        Session::start(SessionConfig::new(EngineOptions::new(stockfish)), Arc::clone(&slot));
+    let (session, events) = Session::start(SessionConfig::new(options), Arc::clone(&slot));
 
     let demo = Demo::start(Arc::clone(&slot), per_move);
 
@@ -57,7 +82,7 @@ fn demo(per_move: Duration) -> Result<()> {
             continue;
         };
         match event {
-            Event::EngineReady { name } => println!("▶ {name}"),
+            Event::EngineReady { name, .. } => println!("▶ {name}"),
             Event::EngineFailed { message, .. } => println!("⚠ движок: {message}"),
             Event::Game { game: g, change } => {
                 if let GameEvent::Moved { .. } = change {

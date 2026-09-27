@@ -1,7 +1,8 @@
 //! Шахматный анализатор — суфлёр комментатора шахматных трансляций.
 //!
 //! Окно на GPUI поверх ядра (`analyzer-session`): захват окна трансляции,
-//! распознавание доски, партия, анализ Stockfish и подсказки.
+//! распознавание доски, партия, анализ движком (Stockfish, Reckless или
+//! любым UCI-движком) и подсказки.
 
 // Выпускная сборка на Windows — оконная программа: без окна консоли рядом.
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
@@ -12,6 +13,7 @@ mod overlay;
 mod pieces;
 mod platform;
 mod refind;
+mod settings;
 mod theme;
 mod views;
 mod workspace;

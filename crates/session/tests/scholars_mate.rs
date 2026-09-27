@@ -1,5 +1,6 @@
-//! Вся цепочка на настоящем Stockfish: кадры → распознавание → партия →
-//! анализ → класс хода и подсказки. Выключена по умолчанию (нужен Stockfish).
+//! Вся цепочка на настоящих движках: кадры → распознавание → партия →
+//! анализ → класс хода и подсказки. Выключена по умолчанию: нужны движки
+//! (`cargo xtask fetch-engines`).
 //!
 //! `cargo test -p analyzer-session -- --ignored`
 
@@ -7,19 +8,26 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use analyzer_chess::{CastlingMode, Chess, MoveClass, Position, SanPlus, UciMove};
-use analyzer_engine::{EngineOptions, locate_stockfish};
+use analyzer_engine::{Bundled, EngineOptions};
 use analyzer_session::{Event, HintKind, Session, SessionConfig};
 use analyzer_vision::FrameSlot;
 use analyzer_vision::synth::{Style, render};
 
 #[test]
-#[ignore = "нужен Stockfish: cargo xtask fetch-stockfish"]
-fn a_blunder_into_mate_is_flagged_and_the_mate_is_announced() {
-    let engine = EngineOptions {
-        threads: 2,
-        hash_mb: 64,
-        ..EngineOptions::new(locate_stockfish().expect("Stockfish"))
-    };
+#[ignore = "нужен Stockfish: cargo xtask fetch-engines"]
+fn stockfish_flags_a_blunder_into_mate_and_announces_the_mate() {
+    a_blunder_into_mate_is_flagged_and_the_mate_is_announced(Bundled::Stockfish);
+}
+
+#[test]
+#[ignore = "нужен Reckless: cargo xtask fetch-engines"]
+fn reckless_flags_a_blunder_into_mate_and_announces_the_mate() {
+    a_blunder_into_mate_is_flagged_and_the_mate_is_announced(Bundled::Reckless);
+}
+
+fn a_blunder_into_mate_is_flagged_and_the_mate_is_announced(engine: Bundled) {
+    let path = engine.locate().unwrap_or_else(|| panic!("{} not found", engine.title()));
+    let engine = EngineOptions { threads: 2, hash_mb: 64, ..EngineOptions::new(path) };
     let slot = Arc::new(FrameSlot::new());
     let (session, events) = Session::start(SessionConfig::new(engine), Arc::clone(&slot));
 

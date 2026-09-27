@@ -74,7 +74,7 @@ impl Model {
                 self.analysis = Some(update);
             }
             Event::AnalysisFinished { .. } => self.finished = true,
-            Event::EngineReady { name } => {
+            Event::EngineReady { name, .. } => {
                 self.engine_name = Some(name);
                 self.engine_error = None;
             }
@@ -99,6 +99,17 @@ impl Model {
                 self.recognition = Some(status);
             }
         }
+    }
+
+    /// Комментатор сменил движок. Пока новый не ответит, прежние имя,
+    /// ошибка и анализ ни к чему: оценка и стрелки прежнего движка под
+    /// именем нового ввели бы в заблуждение. Шкала при этом стоит на месте —
+    /// на последней известной оценке.
+    pub fn engine_changing(&mut self) {
+        self.engine_name = None;
+        self.engine_error = None;
+        self.analysis = None;
+        self.finished = false;
     }
 
     pub fn score(&self) -> Option<Score> {
@@ -370,6 +381,26 @@ mod tests {
         assert_eq!(model.trusted_board(Instant::now() + DOUBT).map(|b| b.rect.x), Some(40.0));
         model.forget_board();
         assert_eq!(model.trusted_board(Instant::now()), None, "the board is being searched anew");
+    }
+
+    #[test]
+    fn a_new_engine_starts_from_a_clean_slate_but_the_bar_stays() {
+        let mut model = Model::default();
+        model.apply(Event::Game {
+            game: game(&[]),
+            change: GameEvent::Started { position: Chess::default(), reason: StartReason::First },
+        });
+        model.apply(Event::EngineReady { name: "Stockfish 19".into(), lines: 3 });
+        model.apply(analysis(80));
+        model.apply(Event::AnalysisFinished { id: PositionId(1), depth: 40 });
+        model.engine_changing();
+        assert_eq!(
+            (model.engine_name.as_deref(), model.analysis.is_none(), model.finished),
+            (None, true, false)
+        );
+        assert_eq!(model.bar_target(), white_share(Score::Cp(80)), "the bar waits for the new engine");
+        model.apply(Event::EngineReady { name: "Reckless 0.9.0".into(), lines: 3 });
+        assert_eq!(model.engine_name.as_deref(), Some("Reckless 0.9.0"));
     }
 
     #[test]

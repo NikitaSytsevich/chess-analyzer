@@ -1,4 +1,4 @@
-//! UCI-клиент Stockfish.
+//! UCI-клиент: Stockfish, Reckless или любой другой UCI-движок.
 //!
 //! Движок живёт в своём потоке ([`Engine`]): ему присылают позиции на анализ,
 //! он присылает обновления в канал событий. Правила протокола соблюдаются
@@ -7,16 +7,18 @@
 //! сменилась, до интерфейса не доходит.
 
 mod actor;
+mod catalog;
 mod transport;
 mod uci;
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::thread::JoinHandle;
 use std::time::Duration;
 
 use analyzer_chess::{Chess, Game, Move, Position, Score, UciMove, Wdl};
 
 use crate::actor::Command;
+pub use crate::catalog::{Bundled, EngineChoice, Pace};
 use crate::transport::{Factory, ProcessTransport};
 
 /// Номер позиции, выданный тем, кто просит анализ. По нему обновления
@@ -27,9 +29,17 @@ pub struct PositionId(pub u64);
 #[derive(Clone, Debug, PartialEq)]
 pub struct EngineOptions {
     pub path: PathBuf,
+    /// На сколько полуходов раньше обычного сессия верит анализу: у движка,
+    /// который за то же время считает мельче Stockfish (см.
+    /// [`Bundled::depth_lag`]), и в быстром режиме (см. [`Pace::Fast`]).
+    /// Самому движку это не передаётся.
+    pub depth_discount: u32,
     pub threads: u16,
     pub hash_mb: u32,
     pub multipv: u8,
+    /// Обновления анализа — не чаще этого. Первые глубины движок проходит
+    /// за миллисекунды, и без предела цифры оценки мелькали бы.
+    pub update_interval: Duration,
     /// Анализ позиции замирает на этой глубине…
     pub max_depth: u32,
     /// …или через столько времени — что наступит раньше. Бесконечный анализ
@@ -46,9 +56,11 @@ impl EngineOptions {
         let cores = std::thread::available_parallelism().map_or(2, usize::from);
         Self {
             path: path.into(),
+            depth_discount: 0,
             threads: (cores / 2).clamp(1, 8) as u16,
             hash_mb: 256,
             multipv: 3,
+            update_interval: Duration::from_millis(100),
             max_depth: 40,
             max_time: Duration::from_secs(60),
         }
@@ -118,9 +130,11 @@ impl AnalysisUpdate {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum EngineEvent {
-    /// Движок запущен и настроен.
+    /// Движок запущен и настроен. `lines` — сколько линий он присылает:
+    /// у движка без MultiPV — одна.
     Ready {
         name: String,
+        lines: u8,
     },
     Update(AnalysisUpdate),
     /// Анализ позиции закончен по пределу глубины или времени.
@@ -174,7 +188,9 @@ impl Engine {
         let _ = self.commands.send(Command::Stop);
     }
 
-    /// Новые настройки: движок перезапускается и продолжает текущую позицию.
+    /// Новые настройки. Другой движок, другие Hash и Threads — движок
+    /// перезапускается; другое число линий — меняется между поисками, без
+    /// перезапуска. Текущая позиция продолжается с новыми настройками.
     pub fn configure(&self, options: EngineOptions) {
         let _ = self.commands.send(Command::Configure(options));
     }
@@ -187,31 +203,6 @@ impl Drop for Engine {
             let _ = thread.join();
         }
     }
-}
-
-/// Где лежит Stockfish: переменная `STOCKFISH_PATH`, затем рядом с
-/// программой (в `.app` — `Contents/Resources/engines/stockfish`, в папке
-/// Windows и Linux — `engines/stockfish`), затем `vendor/` рабочей копии —
-/// для запуска из `cargo run` и тестов, — и наконец Stockfish, установленный
-/// в систему (`PATH`, а на Debian и Ubuntu — `/usr/games`).
-pub fn locate_stockfish() -> Option<PathBuf> {
-    if let Some(path) = std::env::var_os("STOCKFISH_PATH").map(PathBuf::from) {
-        return Some(path);
-    }
-    let file = format!("stockfish{}", std::env::consts::EXE_SUFFIX);
-    let bundled = std::env::current_exe().ok().and_then(|exe| {
-        let dir = exe.parent()?;
-        Some(
-            if cfg!(target_os = "macos") { dir.join("../Resources/engines") } else { dir.join("engines") }
-                .join(&file),
-        )
-    });
-    let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../vendor/stockfish").join(&file);
-    let path = std::env::var_os("PATH").unwrap_or_default();
-    let system = std::env::split_paths(&path)
-        .chain(cfg!(target_os = "linux").then(|| PathBuf::from("/usr/games")))
-        .map(|dir| dir.join(&file));
-    [bundled, Some(workspace)].into_iter().flatten().chain(system).find(|path| path.is_file())
 }
 
 /// Сколько линий движок пришлёт на каждой глубине: не больше, чем легальных

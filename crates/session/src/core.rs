@@ -18,6 +18,12 @@ use analyzer_tracker::GameEvent;
 use crate::Event;
 use crate::hints::{HintKind, error_hint, mate_hint, mover_mates, only_move_hint, standout_hint};
 
+// Глубины ниже — для Stockfish в точном режиме. Другой движок может считать
+// иначе: Reckless режет перебор осторожнее и за то же время доходит на два
+// полухода мельче, а ход находит не хуже. Для него пороги сдвигаются (см.
+// `Depths`), иначе значки и подсказки ждали бы его в полтора-два раза
+// дольше. Сдвигаются они и в быстром режиме — для пули и блица.
+
 /// Глубина, с которой оценке уже можно доверять для классификации хода…
 const ASSESS_DEPTH: u32 = 10;
 /// …с которой оценка позиции после хода устоялась и класс хода можно
@@ -38,6 +44,30 @@ const HINT_DEPTH: u32 = 16;
 /// Столько позиций кэш оценок держит без разбора. Дальше в нём остаются
 /// только позиции текущей партии: комментатор может вести трансляцию часами.
 const KNOWN_LIMIT: usize = 4096;
+
+/// Пороги глубины, сдвинутые на `discount` полуходов раньше (см.
+/// `analyzer_engine::EngineOptions::depth_discount`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Depths {
+    assess: u32,
+    settled: u32,
+    final_: u32,
+    hint: u32,
+}
+
+impl Depths {
+    pub(crate) fn new(discount: u32) -> Self {
+        // Мельче этого не верим ни в каком режиме: на первых итерациях
+        // движок не видит и простой тактики.
+        let shifted = |depth: u32, floor: u32| depth.saturating_sub(discount).max(floor);
+        Self {
+            assess: shifted(ASSESS_DEPTH, 6),
+            settled: shifted(SETTLED_DEPTH, 8),
+            final_: shifted(FINAL_DEPTH, 10),
+            hint: shifted(HINT_DEPTH, 8),
+        }
+    }
+}
 
 /// Класс хода и что о нём уже сказано интерфейсу.
 #[derive(Clone, Copy)]
@@ -62,6 +92,7 @@ pub(crate) struct Core {
     pub(crate) notation: Notation,
     pub(crate) thresholds: Thresholds,
     pub(crate) paused: bool,
+    depths: Depths,
     game: Option<Arc<Game>>,
     next_id: u64,
     /// Позиция, которую сейчас анализирует движок.
@@ -87,6 +118,7 @@ impl Core {
             notation,
             thresholds,
             paused: false,
+            depths: Depths::new(0),
             game: None,
             next_id: 1,
             current: None,
@@ -151,6 +183,27 @@ impl Core {
         engine.analyze(AnalysisRequest::from_game(id, game.as_ref(), new_game));
     }
 
+    /// Движок или режим сменился; текущая позиция анализируется заново.
+    /// `depth_discount` — на сколько полуходов раньше теперь верить анализу.
+    ///
+    /// Если сменился сам движок (`other_engine`), прежние оценки забываются:
+    /// они в шкале прежнего движка и с его глубинами — смешай их с оценками
+    /// нового, и ход получил бы класс за разницу движков, а не за ошибку
+    /// игрока. Уже поставленные классы ходов остаются.
+    pub(crate) fn engine_changed(&mut self, engine: &Engine, depth_discount: u32, other_engine: bool) {
+        self.depths = Depths::new(depth_discount);
+        if other_engine {
+            self.known.clear();
+        }
+        self.current = None;
+        self.analyze(engine, false);
+    }
+
+    /// Пороги глубины для движка и режима, с которыми сессия запускается.
+    pub(crate) fn set_depth_discount(&mut self, depth_discount: u32) {
+        self.depths = Depths::new(depth_discount);
+    }
+
     /// Обновление анализа: только для позиции, которая сейчас на доске.
     pub(crate) fn analysis(&mut self, update: AnalysisUpdate, out: &mut Vec<Event>) {
         let Some((id, hash)) = self.current else { return };
@@ -199,7 +252,8 @@ impl Core {
         else {
             return;
         };
-        if was.depth < ASSESS_DEPTH || now.depth < ASSESS_DEPTH {
+        let depths = self.depths;
+        if was.depth < depths.assess || now.depth < depths.assess {
             return;
         }
         let (Some(best_before), Some(best_after)) = (was.lines.first(), now.lines.first()) else { return };
@@ -212,7 +266,7 @@ impl Core {
             best == Some(played),
             &self.thresholds,
         );
-        let settled = now.depth >= SETTLED_DEPTH;
+        let settled = now.depth >= depths.settled;
         if settled {
             let context = MoveContext {
                 before,
@@ -227,7 +281,7 @@ impl Core {
                 assessment.class = class;
             }
         }
-        let final_ = now.depth >= FINAL_DEPTH && was.depth >= FINAL_DEPTH.min(ASSESS_DEPTH + 4);
+        let final_ = now.depth >= depths.final_ && was.depth >= depths.final_.min(depths.assess + 4);
         // Показанный класс дальше только уточняется; новый показывается,
         // когда устоялся, — или сразу, если это ошибка или зевок.
         let shown = previous.is_some_and(|previous| previous.shown)
@@ -254,7 +308,7 @@ impl Core {
         let best_line = self
             .known
             .get(&position_hash(before))
-            .filter(|was| was.depth >= ASSESS_DEPTH)
+            .filter(|was| was.depth >= self.depths.assess)
             .and_then(|was| was.lines.first());
         let best = best_line.and_then(|line| line.moves.first().copied());
         let Some(assessment) = assess_ending(
@@ -324,9 +378,10 @@ impl Core {
         let hash = position_hash(&position);
         // Мат — точная оценка: найденный на глубине 2n+2, он уже не
         // передумается, а на короткий мат движок и не считает до 16.
+        let hint_depth = self.depths.hint;
         let mate_depth = match best.score {
-            Score::Mate(n) => (2 * n.unsigned_abs() + 2).min(HINT_DEPTH),
-            Score::Cp(_) => HINT_DEPTH,
+            Score::Mate(n) => (2 * n.unsigned_abs() + 2).min(hint_depth),
+            Score::Cp(_) => hint_depth,
         };
         if update.depth >= mate_depth
             && let Some(hint) = mate_hint(ply, &position, best.score, &best.moves, self.notation)
@@ -335,7 +390,7 @@ impl Core {
             out.push(Event::Hint(hint));
         }
         // Единственный ход, который матует, уже назван подсказкой о мате.
-        if update.depth >= HINT_DEPTH
+        if update.depth >= hint_depth
             && !mover_mates(&position, best.score)
             && let (Some(second), Some(&mv)) = (update.lines.get(1), best.moves.first())
             && is_only_move(position.turn(), best.score, second.score, &self.thresholds)
@@ -445,6 +500,79 @@ mod tests {
             hint.as_deref(),
             Some("60.Фg6?? — зевок: оценка #2 → 0.00, выигрыш упущен. Сильнее 60.Фd8+")
         );
+    }
+
+    #[test]
+    fn a_new_engine_starts_the_position_over() {
+        let engine = engine();
+        let mut core = Core::new(Notation::Russian, Thresholds::default());
+        let game = start(&mut core, &engine, Chess::default());
+        let (game, _) = play(&mut core, &engine, &game, "e2e4");
+        analysed(&mut core, &game, 30, Score::Cp(30), "e7e5");
+        let (before, _) = core.current.unwrap();
+        core.engine_changed(&engine, 0, true);
+        let (after, _) = core.current.expect("the position is analysed again");
+        assert_ne!(before, after, "a new request, not the old engine's one");
+        // Новый движок на глубине 12 — уже лучшее, что известно о позиции:
+        // глубина 30 прежнего движка ему не мешает.
+        analysed(&mut core, &game, 12, Score::Cp(-40), "c7c5");
+        let known = &core.known[&position_hash(game.current())];
+        assert_eq!((known.depth, known.lines[0].score), (12, Score::Cp(-40)));
+    }
+
+    #[test]
+    fn a_shallower_engine_gets_its_badge_at_its_own_depth() {
+        // Reckless за то же время считает на два полухода мельче Stockfish:
+        // класс хода устаивается у него на глубине 12, а не 14.
+        let engine = engine();
+        let mut core = Core::new(Notation::Russian, Thresholds::default());
+        core.set_depth_discount(2);
+        let game = start(&mut core, &engine, Chess::default());
+        analysed(&mut core, &game, 16, Score::Cp(30), "e2e4");
+        let (game, _) = play(&mut core, &engine, &game, "e2e4");
+        let (id, _) = core.current.unwrap();
+        let line = |depth| Line {
+            multipv: 1,
+            depth,
+            score: Score::Cp(30),
+            wdl: None,
+            moves: vec!["e7e5".parse::<UciMove>().unwrap().to_move(game.current()).unwrap()],
+        };
+        let update = |depth| AnalysisUpdate {
+            id,
+            depth,
+            seldepth: depth,
+            nodes: 0,
+            nps: 0,
+            hashfull: 0,
+            elapsed: std::time::Duration::ZERO,
+            lines: vec![line(depth)],
+        };
+        let shown =
+            |events: &[Event]| events.iter().any(|event| matches!(event, Event::Assessment { ply: 1, .. }));
+        let mut out = Vec::new();
+        core.analysis(update(11), &mut out);
+        assert!(!shown(&out), "depth 11 is not settled yet");
+        core.analysis(update(12), &mut out);
+        assert!(shown(&out), "depth 12 is settled for an engine two plies shallower");
+        assert_eq!(Depths::new(2), Depths { assess: 8, settled: 12, final_: 16, hint: 14 });
+        assert_eq!(Depths::new(0).settled, SETTLED_DEPTH);
+        // Быстрый режим — ещё на четыре полухода раньше, но не мельче пола.
+        assert_eq!(Depths::new(4), Depths { assess: 6, settled: 10, final_: 14, hint: 12 });
+        assert_eq!(Depths::new(6), Depths { assess: 6, settled: 8, final_: 12, hint: 10 });
+    }
+
+    #[test]
+    fn a_faster_pace_keeps_what_the_engine_already_knows() {
+        let engine = engine();
+        let mut core = Core::new(Notation::Russian, Thresholds::default());
+        let game = start(&mut core, &engine, Chess::default());
+        analysed(&mut core, &game, 24, Score::Cp(30), "e2e4");
+        // Тот же движок в быстром режиме: оценки прежние, пороги ниже.
+        core.engine_changed(&engine, 4, false);
+        assert_eq!(core.known[&position_hash(game.current())].depth, 24);
+        assert_eq!(core.depths.settled, 10);
+        assert!(core.current.is_some(), "the position is analysed again");
     }
 
     #[test]

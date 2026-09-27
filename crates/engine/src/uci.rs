@@ -25,15 +25,36 @@ pub enum RawScore {
     Mate(i32),
 }
 
+/// Опция, которую движок объявил в ответ на `uci`: `option name Hash type
+/// spin default 16 min 1 max 33554432`. Движки разные — у одного нет
+/// MultiPV, у другого Hash не больше 128 МБ, — поэтому движку отправляются
+/// только объявленные опции и только в объявленных пределах.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UciOption {
+    /// Имя, как его написал движок: имена опций в UCI без учёта регистра.
+    pub name: String,
+    pub min: Option<i64>,
+    pub max: Option<i64>,
+}
+
+impl UciOption {
+    /// `value` в пределах, которые объявил движок.
+    pub fn clamp(&self, value: i64) -> i64 {
+        let value = self.min.map_or(value, |min| value.max(min));
+        self.max.map_or(value, |max| value.min(max))
+    }
+}
+
 /// Что за строка пришла от движка.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum EngineLine {
     UciOk,
     ReadyOk,
     IdName(String),
+    Option(UciOption),
     Info(InfoLine),
     BestMove(Option<String>),
-    /// Всё остальное: `info string …`, строки без варианта, опции.
+    /// Всё остальное: `info string …`, строки без варианта.
     Other,
 }
 
@@ -43,12 +64,43 @@ pub fn parse_line(line: &str) -> EngineLine {
         Some("uciok") => EngineLine::UciOk,
         Some("readyok") => EngineLine::ReadyOk,
         Some("id") if words.next() == Some("name") => EngineLine::IdName(words.collect::<Vec<_>>().join(" ")),
+        Some("option") => parse_option(words).map_or(EngineLine::Other, EngineLine::Option),
         Some("bestmove") => {
             EngineLine::BestMove(words.next().filter(|mv| *mv != "(none)").map(str::to_owned))
         }
         Some("info") => parse_info(words).map_or(EngineLine::Other, EngineLine::Info),
         _ => EngineLine::Other,
     }
+}
+
+/// `name <имя из нескольких слов> type <тип> [default …] [min …] [max …] [var …]`.
+fn parse_option<'a>(mut words: impl Iterator<Item = &'a str>) -> Option<UciOption> {
+    if words.next()? != "name" {
+        return None;
+    }
+    let mut name = Vec::new();
+    for word in words.by_ref() {
+        if word == "type" {
+            break;
+        }
+        name.push(word);
+    }
+    if name.is_empty() {
+        return None;
+    }
+    // Пределы есть только у чисел (`spin`). У строк значение по умолчанию
+    // бывает из нескольких слов — среди них может попасться и «min».
+    let (mut min, mut max) = (None, None);
+    if words.next() == Some("spin") {
+        while let Some(word) = words.next() {
+            match word {
+                "min" => min = words.next().and_then(|value| value.parse().ok()),
+                "max" => max = words.next().and_then(|value| value.parse().ok()),
+                _ => {}
+            }
+        }
+    }
+    Some(UciOption { name: name.join(" "), min, max })
 }
 
 fn parse_info<'a>(mut words: impl Iterator<Item = &'a str>) -> Option<InfoLine> {
@@ -151,5 +203,28 @@ mod tests {
         assert_eq!(parse_line("bestmove (none)"), EngineLine::BestMove(None));
         assert_eq!(parse_line("id name Stockfish 19"), EngineLine::IdName("Stockfish 19".into()));
         assert_eq!(parse_line("uciok"), EngineLine::UciOk);
+    }
+
+    #[test]
+    fn declared_options_keep_their_names_and_limits() {
+        let option = |line| match parse_line(line) {
+            EngineLine::Option(option) => option,
+            other => panic!("not an option: {other:?}"),
+        };
+        // Строки из настоящего вывода Stockfish 19 и Reckless 0.9.
+        let hash = option("option name Hash type spin default 16 min 1 max 33554432");
+        assert_eq!(hash, UciOption { name: "Hash".into(), min: Some(1), max: Some(33_554_432) });
+        assert_eq!(hash.clamp(256), 256);
+        let threads = option("option name Threads type spin default 1 min 1 max 512");
+        assert_eq!(threads.clamp(0), 1);
+        assert_eq!(threads.clamp(4096), 512);
+        let wdl = option("option name UCI_ShowWDL type check default false");
+        assert_eq!(wdl, UciOption { name: "UCI_ShowWDL".into(), min: None, max: None });
+        // Имя из нескольких слов; у строки пределов нет, даже если слово «min»
+        // встретилось в значении по умолчанию.
+        assert_eq!(option("option name Clear Hash type button").name, "Clear Hash");
+        let log = option("option name Debug Log File type string default min 5");
+        assert_eq!(log, UciOption { name: "Debug Log File".into(), min: None, max: None });
+        assert_eq!(parse_line("option name"), EngineLine::Other);
     }
 }
